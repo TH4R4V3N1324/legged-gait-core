@@ -2,7 +2,7 @@
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
   <name>gait_core</name>
-  <version>0.12.0</version>
+  <version>0.13.0</version>
   <description>ROS-free legged robot gait and behaviour core: robot definitions, leg kinematics, gaits, trajectories, odometry and battery behaviour, shared by the ROS 2 stack and the ESP32 / Servo2040 firmware.</description>
   <maintainer email="152168596+TH4R4V3N1324@users.noreply.github.com">raven</maintainer>
   <license>Apache-2.0</license>
