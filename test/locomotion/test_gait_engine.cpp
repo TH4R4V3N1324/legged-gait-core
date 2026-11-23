@@ -166,6 +166,41 @@ TEST(GaitEngine, ControllerTiltLatchesNeutralAndRecentresOnRelease) {
     EXPECT_FALSE(robot.engine.controllerTiltActive());
 }
 
+namespace {
+
+/**
+ * @brief An IMU sample stamped now, with angular velocity and linear acceleration
+*/
+ImuSample imuWithRates(Timestamp now) {
+    ImuSample sample;
+    sample.stamp = now;
+    sample.roll = static_cast<Scalar>(0.05);
+    sample.angularVelocity = gait_core::Vec3(static_cast<Scalar>(0.1), static_cast<Scalar>(-0.2), static_cast<Scalar>(0.3));
+    sample.linearAcceleration = gait_core::Vec3(static_cast<Scalar>(0.5), 0, static_cast<Scalar>(9.81));
+    return sample;
+}
+
+}  // namespace
+
+TEST(GaitEngine, ImuRatesAndAccelerationAreKept) {
+    Robot robot;
+    const ImuSample sample = imuWithRates(robot.now);
+    robot.engine.setImu(sample);
+    robot.run(0.01);
+    EXPECT_EQ(robot.engine.imuAngularVelocity(), sample.angularVelocity);
+    EXPECT_EQ(robot.engine.imuLinearAcceleration(), sample.linearAcceleration);
+}
+
+TEST(GaitEngine, PowerLossRebuildKeepsTheImuRates) {
+    Robot robot = standingRobot();
+    const ImuSample sample = imuWithRates(robot.now);
+    robot.engine.setImu(sample);
+    robot.engine.servoPowerLost();
+    EXPECT_FALSE(robot.engine.servoPower());
+    EXPECT_EQ(robot.engine.imuAngularVelocity(), sample.angularVelocity);
+    EXPECT_EQ(robot.engine.imuLinearAcceleration(), sample.linearAcceleration);
+}
+
 TEST(GaitEngine, ServosStayOffUntilTheFirstStand) {
     GaitParams params;
     params.power_on_startup = false;

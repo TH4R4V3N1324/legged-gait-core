@@ -7,14 +7,16 @@ namespace gait_core {
 using namespace engine_internal;
 
 /**
- * @brief Store the body's orientation from the IMU
- * @param[in] sample Roll, pitch and yaw (rad), and when they were received
+ * @brief Store the body's orientation, angular velocity and linear acceleration from the IMU
+ * @param[in] sample The IMU reading, and when it was received
  * @note Yaw is only used by tilt mode to hold the heading; odometry provides it otherwise.
 */
 void GaitEngine::setImu(const ImuSample& sample) {
     body_roll = sample.roll;
     body_pitch = sample.pitch;
     body_yaw = sample.yaw;
+    body_angular_velocity = sample.angularVelocity;
+    body_linear_acceleration = sample.linearAcceleration;
     last_imu_time = sample.stamp;
     has_imu = true;
 }

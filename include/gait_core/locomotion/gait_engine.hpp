@@ -130,13 +130,19 @@ struct JointFeedback {
 };
 
 /**
- * @brief Body orientation from an IMU (rad), and when it was received
+ * @brief An IMU reading: orientation, angular velocity and linear acceleration, and when it was received
+ * @note Rates and acceleration are in the body frame (REP 103: +x forward, +y left, +z up), so an
+ *       IMU mounted another way is rotated into it by the caller. Linear acceleration is what an
+ *       accelerometer reads (as sensor_msgs/Imu carries it), so it includes gravity: about
+ *       (0, 0, +9.81) with the body level and still. setControllerImu only uses the orientation.
 */
 struct ImuSample {
     Timestamp stamp = 0;
     Scalar roll = Scalar(0);
     Scalar pitch = Scalar(0);
     Scalar yaw = Scalar(0);
+    Vec3 angularVelocity = Vec3::Zero();      // rad/s, about the body's x (roll), y (pitch) and z (yaw) axes
+    Vec3 linearAcceleration = Vec3::Zero();   // m/s^2, gravity included
 };
 
 /**
@@ -261,6 +267,8 @@ public:
     Scalar floorRise() const;
     Scalar imuRoll() const { return body_roll; }
     Scalar imuPitch() const { return body_pitch; }
+    const Vec3& imuAngularVelocity() const { return body_angular_velocity; }   // rad/s, body frame
+    const Vec3& imuLinearAcceleration() const { return body_linear_acceleration; }   // m/s^2, body frame, gravity included
     bool controllerTiltActive() const { return controller_tilt_active; }
 
     // ---- Hooks ------------------------------------------------------------------------------
@@ -331,6 +339,8 @@ private:
     Scalar body_yaw = Scalar(0);
     Timestamp last_imu_time = 0;
     bool has_imu = false;
+    Vec3 body_angular_velocity = Vec3::Zero();      // rad/s, body frame
+    Vec3 body_linear_acceleration = Vec3::Zero();   // m/s^2, body frame, gravity included
 
     // Controller orientation following
     Scalar controller_reference_roll = Scalar(0);

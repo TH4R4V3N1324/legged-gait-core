@@ -86,6 +86,8 @@ public:
                 sample.stamp = now;
                 sample.roll = static_cast<Scalar>(0.05);
                 sample.pitch = static_cast<Scalar>(-0.04);
+                sample.angularVelocity = Vec3(static_cast<Scalar>(0.1), static_cast<Scalar>(-0.1), 0);
+                sample.linearAcceleration = Vec3(0, 0, static_cast<Scalar>(9.81));
                 engine.setImu(sample);
             }
             now += 10'000'000;

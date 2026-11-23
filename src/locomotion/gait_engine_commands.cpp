@@ -206,6 +206,8 @@ void GaitEngine::cutServoPower() {
     fresh.body_yaw = body_yaw;
     fresh.last_imu_time = last_imu_time;
     fresh.has_imu = has_imu;
+    fresh.body_angular_velocity = body_angular_velocity;
+    fresh.body_linear_acceleration = body_linear_acceleration;
     fresh.stand_height = stand_height;
     fresh.config().setGait(config().currentGait);
     fresh.last_throttled_log = last_throttled_log;
