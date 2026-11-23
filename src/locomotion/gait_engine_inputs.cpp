@@ -76,6 +76,13 @@ bool GaitEngine::onJointStates(const JointFeedback& feedback) {
     if (all_found && feedback.hasEffort) {
         updateFootForces(feedback);
     }
+    // Contact sensors know better than forces worked out from the efforts
+    contact_sensed = feedback.hasContact;
+    if (feedback.hasContact) {
+        for (int legNum = 0; legNum < numLegs(); ++legNum) {
+            foot_contact[legNum] = feedback.contact[legNum];
+        }
+    }
 
     if (has_joint_states && positions_initialized) {
         return updateLegOdometry(feedback.stamp);

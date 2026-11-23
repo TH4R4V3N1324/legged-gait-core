@@ -1141,7 +1141,8 @@ GaitParams feedbackParams(bool on = true) {
 }
 
 /**
- * @brief Standing, with the IMU and foot forces fed
+ * @brief Standing, with the IMU and foot forces fed, long enough for balance feedback to have learnt
+ *        the robot's usual wobble (it watches for 2 s before it acts)
 */
 Robot sensedRobot(const GaitParams& params) {
     Robot robot(params);
@@ -1149,7 +1150,7 @@ Robot sensedRobot(const GaitParams& params) {
     robot.forces = true;
     robot.run(3.0);
     robot.engine.sit(false);
-    robot.run(7.0);
+    robot.run(9.0);
     return robot;
 }
 
@@ -1324,6 +1325,276 @@ TEST(GaitEngine, FeedbackLeavesATrotAlone) {
     robot.run(1.0);
     robot.push = gait_core::Vec3(8, 0, 0);
     runChecking(robot, 0.5, [&] {
+        ASSERT_FALSE(robot.engine.catchingStep());
+        ASSERT_LT(robot.engine.balanceCorrection().norm(), 0.001);
+    });
+}
+
+// ---------------------------------------------------------------------------------------------
+// Preview control (Phase C)
+// ---------------------------------------------------------------------------------------------
+
+namespace {
+
+struct CrawlResult {
+    double walked = 0, worstCom = 1, worstZmp = 1, maxSway = 0, swayAccel = 0;
+};
+
+/**
+ * @brief A quadruped crawling at 0.05 m/s for 15 s, from standing
+*/
+CrawlResult crawlFor15s(bool preview) {
+    GaitParams params;
+    params.allow_unstable_gaits = true;
+    params.preview_control = preview;
+    Robot robot(params, quadruped());
+    robot.run(3.0);
+    robot.engine.sit(false);
+    robot.run(6.5);
+    robot.engine.setGait(1);
+    robot.engine.setVelocity({static_cast<Scalar>(0.05), 0, 0});
+    CrawlResult r;
+    gait_core::Vec2 lastSway = robot.engine.bodySway(), lastStep = gait_core::Vec2::Zero();
+    const double x0 = robot.engine.odometry().x();
+    runChecking(robot, 15.0, [&] {
+        const gait_core::BalanceState& s = robot.engine.balanceState();
+        if (s.plantedCount >= 3) {
+            r.worstZmp = std::min(r.worstZmp, static_cast<double>(s.zmpMargin));
+            r.worstCom = std::min(r.worstCom, static_cast<double>(s.comMargin));
+        }
+        r.maxSway = std::max(r.maxSway, static_cast<double>(robot.engine.bodySway().norm()));
+        const gait_core::Vec2 step = robot.engine.bodySway() - lastSway;
+        r.swayAccel = std::max(r.swayAccel, static_cast<double>((step - lastStep).norm()) / (0.01 * 0.01));
+        lastStep = step;
+        lastSway = robot.engine.bodySway();
+    });
+    r.walked = robot.engine.odometry().x() - x0;
+    return r;
+}
+
+}  // namespace
+
+TEST(GaitEngine, PreviewControlCrawlsFurtherSaferAndSmoother) {
+    // Reacting, the body only sets off for the next feet once each phase has begun, and the legs wait
+    // for it. Planned, it's on its way already: further in the time, with more margin, more smoothly
+    const CrawlResult reactive = crawlFor15s(false);
+    const CrawlResult planned = crawlFor15s(true);
+    EXPECT_GT(planned.walked, 1.1 * reactive.walked);
+    EXPECT_GT(planned.worstCom, reactive.worstCom);
+    EXPECT_GT(planned.worstZmp, reactive.worstZmp);
+    EXPECT_GT(planned.worstZmp, 0.005);
+    EXPECT_LT(planned.swayAccel, 0.6 * reactive.swayAccel);
+    EXPECT_GT(planned.maxSway, 0.01) << "it does sway";
+}
+
+TEST(GaitEngine, PreviewControlLeavesGaitsThatDontSwayAlone) {
+    auto walk = [](bool preview, double& sway) {
+        GaitParams params;
+        params.preview_control = preview;
+        Robot robot = standingRobot(params);
+        robot.engine.setVelocity({static_cast<Scalar>(0.1), 0, 0});
+        sway = 0;
+        runChecking(robot, 4.0, [&] { sway = std::max(sway, static_cast<double>(robot.engine.bodySway().norm())); });
+        return robot.engine.odometry().x();
+    };
+    double swayOff, swayOn;
+    const Scalar off = walk(false, swayOff);
+    const Scalar on = walk(true, swayOn);
+    EXPECT_EQ(swayOn, 0);
+    EXPECT_EQ(on, off);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Joint torques (Phase C)
+// ---------------------------------------------------------------------------------------------
+
+namespace {
+
+/**
+ * @brief The forces the feet would push with under the torques commanded (body frame), via the
+ *        engine's own inverse, LegKinematics::groundForce
+*/
+struct Forces {
+    gait_core::Vec3 total = gait_core::Vec3::Zero();
+    gait_core::Vec2 cop = gait_core::Vec2::Zero();
+    int pushing = 0;
+};
+
+Forces forcesFrom(const Robot& robot, const GaitOutput& out, const std::array<JointVec, NUM_LEGS>& angles) {
+    Forces f;
+    Scalar vertical = 0;
+    const gait_core::YawPitchPitchLeg leg{explorerRobot().legs[0]};
+    for (int i = 0; i < NUM_LEGS; ++i) {
+        if (out.torques[i].norm() == 0) {
+            continue;
+        }
+        gait_core::Vec3 legForce;
+        EXPECT_TRUE(leg.groundForce(angles[i], out.torques[i], legForce));
+        const auto& t = robot.engine.trajectory();
+        const gait_core::Vec3 force = t.legToBody(i, legForce) - t.legToBody(i, gait_core::Vec3::Zero());
+        const gait_core::Vec3 foot = t.legToBody(i, leg.fk(angles[i]));
+        f.total += force;
+        f.cop += force.z() * foot.head<2>();
+        vertical += force.z();
+        ++f.pushing;
+    }
+    if (vertical > 0) {
+        f.cop /= vertical;
+    }
+    return f;
+}
+
+constexpr double EXPLORER_MASS = 3.323;   // kg, as its CAD gives it
+
+// The torques hold the legs as last reported (the joint state the engine saw), so the forces are
+// worked out from those angles
+std::array<JointVec, NUM_LEGS> seen;
+
+GaitOutput tick(Robot& robot) {
+    for (int leg = 0; leg < NUM_LEGS; ++leg) {
+        seen[leg] = robot.feedback.angles[leg];
+    }
+    robot.feedback.stamp = robot.now;
+    robot.engine.onJointStates(robot.feedback);
+    robot.now += DT_NS;
+    const GaitOutput out = robot.engine.update(DT, robot.now);
+    for (int leg = 0; leg < NUM_LEGS; ++leg) {
+        robot.feedback.angles[leg] = out.joints[leg];
+    }
+    return out;
+}
+
+GaitParams torques(bool on = true) {
+    GaitParams params;
+    params.torque_output = on;
+    return params;
+}
+
+}  // namespace
+
+TEST(GaitEngine, StandingTheTorquesCarryTheRobotFromItsCentreOfMass) {
+    Robot robot = standingRobot(torques());
+    robot.run(1.0);
+    const GaitOutput out = tick(robot);
+    ASSERT_TRUE(out.hasTorques);
+    const Forces f = forcesFrom(robot, out, seen);
+    EXPECT_EQ(f.pushing, NUM_LEGS);
+    EXPECT_NEAR(f.total.z(), EXPLORER_MASS * 9.81, 0.05);
+    EXPECT_NEAR(f.total.head<2>().norm(), 0, 0.01);
+    EXPECT_NEAR((f.cop - robot.engine.centreOfMass().head<2>()).norm(), 0, 0.001);
+}
+
+TEST(GaitEngine, WalkingTheSwingingLegsGetNoTorque) {
+    Robot robot = standingRobot(torques());
+    robot.engine.setVelocity({static_cast<Scalar>(0.1), 0, 0});
+    robot.run(1.0);
+    int checked = 0;
+    for (int i = 0; i < 200; ++i) {
+        const GaitOutput out = tick(robot);
+        ASSERT_TRUE(out.hasTorques);
+        const Forces f = forcesFrom(robot, out, seen);
+        const gait_core::BalanceState& s = robot.engine.balanceState();
+        // No foot in the air carries anything (the swing's first tick has barely lifted it, so only
+        // ones clearly up are checked), at least a tripod always does, and together, the weight
+        const gait_core::YawPitchPitchLeg leg{explorerRobot().legs[0]};
+        for (int l = 0; l < NUM_LEGS; ++l) {
+            if (leg.fk(out.joints[l]).z() > robot.engine.gaitConfig().currentHeight + static_cast<Scalar>(0.001)) {
+                EXPECT_EQ(out.torques[l].norm(), 0) << "tick " << i << " leg " << l;
+            }
+        }
+        EXPECT_GE(f.pushing, 3) << i;
+        EXPECT_NEAR(f.total.z(), EXPLORER_MASS * 9.81, 0.05) << i;
+        // Straight up, through the centre of mass (explorer's gaits don't sway: no planned path)
+        EXPECT_NEAR(f.total.head<2>().norm(), 0, 0.02) << i;
+        EXPECT_NEAR((f.cop - (robot.engine.centreOfMass().head<2>() + robot.engine.bodySway())).norm(), 0, 0.002) << i;
+        (void)s;
+        ++checked;
+    }
+    EXPECT_EQ(checked, 200);
+}
+
+TEST(GaitEngine, OnATiltTheTorquesHoldAgainstGravityAsItReallyIs) {
+    // Rolled 0.1 rad, gravity has a sideways part in the body frame, which the feet have to hold too
+    Robot robot = standingRobot(torques());
+    robot.imu = true;
+    robot.imuRoll = static_cast<Scalar>(0.1);
+    robot.run(0.2);
+    const Forces f = [&] { const GaitOutput o = tick(robot); return forcesFrom(robot, o, seen); }();
+    EXPECT_NEAR(f.total.norm(), EXPLORER_MASS * 9.81, 0.05);
+    EXPECT_NEAR(f.total.y(), EXPLORER_MASS * 9.81 * std::sin(0.1), 0.05);
+}
+
+TEST(GaitEngine, NoTorquesWithoutMassesOrWhenOff) {
+    Robot off = standingRobot(torques(false));
+    const GaitOutput out = tick(off);
+    EXPECT_FALSE(out.hasTorques);
+    for (int leg = 0; leg < NUM_LEGS; ++leg) {
+        EXPECT_EQ(out.torques[leg], JointVec::Zero(3));
+    }
+    gait_core::RobotDefinition massless = explorerRobot();
+    massless.bodyMass = 0;
+    Robot robot(torques(), massless);
+    robot.run(3.0);
+    robot.engine.sit(false);
+    robot.run(6.0);
+    EXPECT_FALSE(tick(robot).hasTorques);
+}
+
+TEST(GaitEngine, SeatedTheTorquesCarryTheRobotToo) {
+    Robot robot = standingRobot(torques());
+    robot.engine.sit(true);
+    robot.run(8.0);
+    ASSERT_EQ(robot.engine.sitState(), SitState::SEATED);
+    const GaitOutput out = tick(robot);
+    ASSERT_TRUE(out.hasTorques);
+    EXPECT_NEAR(forcesFrom(robot, out, seen).total.z(), EXPLORER_MASS * 9.81, 0.05);
+}
+
+TEST(GaitEngine, ALandingFootTakesItsShareGradually) {
+    // Its share ramps in over 50 ms, so a foot landing a touch late isn't loaded all at once
+    Robot robot = standingRobot(torques());
+    robot.engine.setVelocity({static_cast<Scalar>(0.1), 0, 0});
+    robot.run(1.0);
+    std::array<bool, NUM_LEGS> wasCarrying{};
+    std::array<std::vector<Scalar>, NUM_LEGS> after;
+    for (int i = 0; i < 300; ++i) {
+        const GaitOutput out = tick(robot);
+        for (int l = 0; l < NUM_LEGS; ++l) {
+            const bool carrying = out.torques[l].norm() > 0;
+            if (carrying && !wasCarrying[l]) {
+                after[l].clear();
+            }
+            if (carrying && after[l].size() < 10) {
+                after[l].push_back(out.torques[l].norm());
+            }
+            wasCarrying[l] = carrying;
+        }
+    }
+    int landings = 0;
+    for (int l = 0; l < NUM_LEGS; ++l) {
+        if (after[l].size() < 10) {
+            continue;
+        }
+        ++landings;
+        EXPECT_LT(after[l][0], 0.5 * after[l][6]) << "leg " << l << " starts light";
+        EXPECT_GT(after[l][3], after[l][0]) << "leg " << l << " builds up";
+    }
+    EXPECT_GE(landings, 3);
+}
+
+TEST(GaitEngine, FeedbackLearnsBeforeItActs) {
+    // Just stood up, it hasn't seen the robot's usual wobble yet, so even a hard shove only teaches it
+    GaitParams params;
+    params.balance_feedback = true;
+    Robot robot(params);
+    robot.imu = true;
+    robot.forces = true;
+    robot.run(3.0);
+    robot.engine.sit(false);
+    robot.run(6.0);
+    ASSERT_EQ(robot.engine.sitState(), SitState::STANDING);
+    robot.push = gait_core::Vec3(15, 0, 0);
+    runChecking(robot, 0.2, [&] {
         ASSERT_FALSE(robot.engine.catchingStep());
         ASSERT_LT(robot.engine.balanceCorrection().norm(), 0.001);
     });

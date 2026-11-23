@@ -234,6 +234,8 @@ long allocationsRunning(const gait_core::RobotDefinition& robot, double speed, b
     gait_core::GaitParams params;
     params.dynamic_stability = dynamicStability;
     params.balance_feedback = balanceFeedback;
+    params.preview_control = balanceFeedback;   // Phase C with Phase B
+    params.torque_output = balanceFeedback;
     GaitEngine engine{params, robot};
     engine.log = [](LogLevel, const char*) { ++logged; };
     JointFeedback feedback;

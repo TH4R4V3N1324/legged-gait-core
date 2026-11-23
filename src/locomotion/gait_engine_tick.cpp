@@ -7,6 +7,17 @@ namespace gait_core {
 using namespace engine_internal;
 
 GaitOutput GaitEngine::update(Scalar dt, Timestamp now) {
+    walk_advancing = false;   // walk() says otherwise if it moves the gait on
+    advance(dt, now);
+    torque_dt = dt;
+    computeTorques();
+    return output;
+}
+
+/**
+ * @brief update() but for the torques, which are worked out from whatever it commanded
+*/
+GaitOutput GaitEngine::advance(Scalar dt, Timestamp now) {
     now_ = now;
     // A leg count the gait schedules can't handle, or a gait that would tip it over: never command,
     // and keep the servos off

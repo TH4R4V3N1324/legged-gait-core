@@ -60,12 +60,15 @@ add_library(gait_core STATIC
   src/kinematics/yaw_pitch_pitch_leg.cpp
   src/locomotion/balance_controller.cpp
   src/locomotion/gait_config.cpp
+  src/locomotion/preview_controller.cpp
   src/locomotion/gait_engine.cpp
   src/locomotion/gait_engine_balance.cpp
   src/locomotion/gait_engine_commands.cpp
   src/locomotion/gait_engine_inputs.cpp
+  src/locomotion/gait_engine_preview.cpp
   src/locomotion/gait_engine_terrain.cpp
   src/locomotion/gait_engine_tick.cpp
+  src/locomotion/gait_engine_torque.cpp
   src/locomotion/gait_engine_walk.cpp
   src/locomotion/support_polygon.cpp
   src/locomotion/trajectory_generator.cpp

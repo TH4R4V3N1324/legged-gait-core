@@ -8,6 +8,7 @@
 
 #include "gait_core/locomotion/balance_controller.hpp"
 #include "gait_core/locomotion/gait_config.hpp"
+#include "gait_core/locomotion/preview_controller.hpp"
 #include "gait_core/kinematics/yaw_pitch_pitch_leg.hpp"
 #include "gait_core/estimation/body_velocity.hpp"
 #include "gait_core/estimation/leg_odometry.hpp"
@@ -124,6 +125,19 @@ struct GaitParams {
                                                 // gait's usual wobble, over ~2 s), so only a push acts
     Scalar correction_max = Scalar(0.03);       // m, furthest the body shifts over its feet to correct
     bool capture_stepping = true;               // step where the capture point is heading when the shift can't catch it
+
+    // Preview control (live): for a gait that sways, plan the sway over the coming phases instead of
+    // reacting at each. The ZMP reference runs through points inside both the feet down in one phase
+    // and the next, predicted from the gait's schedule and the command, and the body's path is the
+    // smoothest that tracks it (PreviewController), so it's over the next feet before they're all it
+    // has. The sway hold at a phase's start stays, as a safety net. Gaits that don't sway are untouched.
+    bool preview_control = false;
+    Scalar preview_time = Scalar(1.0);          // s of the coming gait it plans over (at most 200 ticks)
+
+    // Joint torques (live), for robots whose actuators take a torque as well as a position: each
+    // planted leg's share of carrying the robot and accelerating it as planned, tau = -J^T f, in
+    // GaitOutput::torques. Needs the robot's masses (RobotDefinition::bodyMass and the links').
+    bool torque_output = false;
 };
 
 enum class SitState : uint8_t {
@@ -148,6 +162,11 @@ struct JointFeedback {
     std::array<bool, kMaxLegs> present{};            // which legs' joints were all reported
     bool hasEffort = false;                          // whether effort is filled in
     std::array<JointVec, kMaxLegs> effort;           // N m the servos apply, same order as angles
+    // From foot contact sensors, for a robot that has them: whether each foot is touching the ground.
+    // When given, it replaces the contact worked out from the efforts, everywhere the engine uses it,
+    // and torque output loads only feet that really are down.
+    bool hasContact = false;
+    std::array<bool, kMaxLegs> contact{};
 
     JointFeedback() {
         angles.fill(JointVec::Zero(YawPitchPitchLeg::kNumJoints));
@@ -186,9 +205,17 @@ struct GaitOutput {
     bool commanded = false;                           // false while waiting for joint states or unpowered
     std::array<JointVec, kMaxLegs> joints;            // rad, indexed by leg number, body to foot
     bool servoPower = false;                          // whether the servos should be powered (drive SERVO_EN from this)
+    // With GaitParams::torque_output: a feedforward torque for each joint (N m, same order as joints)
+    // that carries the robot's weight and pushes it as planned, to add to the position control. Zero
+    // for swinging legs. hasTorques is false when there are none (off, no masses, no foot down).
+    bool hasTorques = false;
+    std::array<JointVec, kMaxLegs> torques;
 
     // Zeros, never empty; the engine resizes each leg to its kinematics' numJoints()
-    GaitOutput() { joints.fill(JointVec::Zero(YawPitchPitchLeg::kNumJoints)); }
+    GaitOutput() {
+        joints.fill(JointVec::Zero(YawPitchPitchLeg::kNumJoints));
+        torques.fill(JointVec::Zero(YawPitchPitchLeg::kNumJoints));
+    }
 };
 
 /**
@@ -328,6 +355,9 @@ public:
     bool gaitHasSupportArea(uint8_t gait) const { return gait < config().numGaits() && gait_area[gait]; }
     // m, the body's current sway (x, y), relative to where walking alone would put it
     const Vec2& bodySway() const { return sway; }
+    // Preview control's planner (see preview_control), and the ZMP it was last asked to track next
+    const PreviewController& preview() const { return preview_controller; }
+    const Vec2& previewReference() const { return preview_reference[0]; }
     // The first of the robot's gaits whose margin is below min_stability_margin, or -1 if none is
     // (always -1 with allow_unstable_gaits)
     int unstableGait() const;
@@ -437,6 +467,7 @@ private:
     // Foot forces and contact
     std::array<Vec3, kMaxLegs> foot_forces{};
     std::array<bool, kMaxLegs> foot_contact{};
+    bool contact_sensed = false;   // the latest joint state's contact came from sensors (JointFeedback::contact)
     std::array<bool, kMaxLegs> foot_force_updated{};
     bool has_foot_forces = false;
     Timestamp last_foot_force_stamp = 0;
@@ -512,6 +543,7 @@ private:
     Vec2 correction_velocity = Vec2::Zero(); // m/s, how fast that shift is moving
     bool correction_saturated = false;       // the shift is at correction_max or limited by the feet
     Scalar capture_noise = 0;                // m^2, the capture point error's running mean square (~2 s)
+    Scalar feedback_time = 0;                // s it has been measuring since it last started (it learns before acting)
     bool catching_step = false;              // stepping to where the capture point is heading
     bool step_needed = false;                // the capture point needs a step this tick
     Vec2 step_offset = Vec2::Zero();         // m, body frame: how far the swinging feet land from the gait's targets
@@ -553,8 +585,32 @@ private:
     BodyPose walkPose() const;
     void easeSway(const Vec2& goal, Scalar dt);
     bool updateSway(Scalar dt, bool idle);
+    bool holdForSway(Scalar dt, bool idle, const std::array<Vec2, kMaxLegs>& feet, int count, const Vec2& goal);
+
+    // Preview control
+    struct PlannedMotion {
+        Scalar forward = 0, left = 0, yaw = 0;   // m/s, m/s, rad/s: the body's commanded velocity
+        Scalar stanceTime = 0;                   // s each foot stays down, which sets where swings land
+    };
+    PlannedMotion planned_motion;                // set by walk() (or zero, stepping back to stance)
+    PreviewController preview_controller;
+    bool preview_started = false;                // whether it has run at all
+    Timestamp preview_last_tick = 0;             // when it last ran: a tick missed restarts it from the body
+    Vec2 preview_from = Vec2::Zero();            // where the reference starts this phase: the last handover
+    Vec2 preview_handover = Vec2::Zero();        // where it hands over to the next phase, as last worked out
+    size_t preview_phase = 0;                    // the phase those are for
+    bool preview_has_phase = false;
+    std::array<Vec2, PreviewController::MAX_STEPS> preview_reference{};
+    Vec2 previewSway(Scalar dt, bool idle, const std::array<Vec2, kMaxLegs>& staying, int stayingCount);
+    Vec2 predictedFoot(int legNum, int segment, const std::array<Scalar, 16>& segmentEnd, Scalar t) const;   // 16: the phases a preview reaches into
 
     void cutServoPower();
+    GaitOutput advance(Scalar dt, Timestamp now);
+    void computeTorques();
+    std::array<Scalar, kMaxLegs> torque_down_time{};   // s each foot has been down, for ramping its share in
+    Scalar torque_dt = 0;                              // the tick the torques are for
+    bool walk_advancing = false;                       // the last walking tick moved the gait on
+    Scalar totalMass() const;
 
     // Log a printf-style message; nothing is formatted unless log is set (and, throttled, due)
     void emit(LogLevel level, const char* format, ...);

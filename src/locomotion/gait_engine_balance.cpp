@@ -436,11 +436,15 @@ void GaitEngine::updateFeedback(Scalar dt, const Vec2& commandedOverGround, cons
     const BalanceState& s = balance_controller.state();
     const Scalar threshold = p.capture_deadband + 3 * std::sqrt(capture_noise);
     capture_noise += (dt / (NOISE_TIME + dt)) * (s.captureError.squaredNorm() - capture_noise);
+    // Until it has watched the gait for that long it doesn't know its wobble: it only learns (a heavy
+    // robot's joints lagging as it sets off would otherwise all look like a push)
+    feedback_time += dt;
+    const bool learning = feedback_time < NOISE_TIME;
 
     // Shift the body to put the capture point back. Only for a gait whose feet always make a polygon:
     // a trot's pair can't push from anywhere but their line, so a shift does nothing for it (the
     // moments its four feet are down don't count). Without area just now, it eases back too.
-    const bool area = gaitHasSupportArea(config().currentGait) && s.supportArea;
+    const bool area = gaitHasSupportArea(config().currentGait) && s.supportArea && !learning;
     const Vec2 push = area ? balance_controller.correctionVelocity(p.capture_gain, threshold) : Vec2::Zero();
     const Vec2 wanted = push - correction / RETURN_TIME;
     const Vec2 change = wanted - correction_velocity;
@@ -489,6 +493,7 @@ void GaitEngine::resetBalance() {
     correction_velocity = Vec2::Zero();
     correction_saturated = false;
     capture_noise = 0;
+    feedback_time = 0;
     catching_step = false;
     step_needed = false;
     step_offset = Vec2::Zero();

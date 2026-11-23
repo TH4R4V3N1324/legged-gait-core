@@ -344,7 +344,7 @@ void GaitEngine::easeSway(const Vec2& goal, Scalar dt) {
 */
 bool GaitEngine::updateSway(Scalar dt, bool idle) {
     sway_holding = false;
-    if (!gaitSways(config().currentGait) || trajectoryGen.gaitState.config.empty()) {
+    if (trajectoryGen.gaitState.config.empty()) {
         easeSway(Vec2::Zero(), dt);
         return false;
     }
@@ -355,6 +355,15 @@ bool GaitEngine::updateSway(Scalar dt, bool idle) {
             feet[count++] = trajectoryGen.legToBody(legNum, current_leg_positions[legNum]).head<2>();
         }
     }
+    if (!gaitSways(config().currentGait)) {
+        easeSway(Vec2::Zero(), dt);
+        return false;
+    }
+    if (p.preview_control) {
+        // Planned ahead; the hold stays as a safety net
+        const Vec2 goal = previewSway(dt, idle, feet, count);
+        return holdForSway(dt, idle, feet, count, goal);
+    }
     const Vec2 centre = com.head<2>();   // body frame; over the ground it's centre + sway
     Vec2 goal = Vec2::Zero();
     if (!(idle && phase_progress == 0)) {
@@ -364,6 +373,16 @@ bool GaitEngine::updateSway(Scalar dt, bool idle) {
         goal = target - centre;
     }
     easeSway(goal, dt);
+    return holdForSway(dt, idle, feet, count, goal);
+}
+
+/**
+ * @brief The sway hold: at a phase's start, wait until the body is over the feet that stay down
+ * @param[in] goal Where the sway is heading, to tell a sway still getting there from one that can't
+ * @return Whether the phase should wait (see updateSway)
+*/
+bool GaitEngine::holdForSway(Scalar dt, bool idle, const std::array<Vec2, kMaxLegs>& feet, int count, const Vec2& goal) {
+    const Vec2 centre = com.head<2>();
 
     if (idle || phase_progress > 0) {
         sway_hold_time = 0;

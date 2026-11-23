@@ -123,6 +123,8 @@ void GaitEngine::returnToStart(Scalar dt) {
     }
 
     // Stepping back in lifts legs too: a gait that sways waits for the body to be over the others
+    planned_motion = PlannedMotion{0, 0, 0, current_phase_duration * static_cast<Scalar>(
+        std::max<size_t>(1, trajectoryGen.gaitState.config.size() - 1))};
     performLegStep(dt, updateSway(dt, false), false);
 
     if (phase_progress >= 1) {
@@ -315,7 +317,8 @@ void GaitEngine::walk(Scalar dt) {
     }
 
     // A gait that sways waits at a phase's start, every foot down, until the body is over the feet
-    // that stay down
+    // that stay down (planned ahead with preview control, which needs the command it walks with)
+    planned_motion = PlannedMotion{forward, left, yaw, stanceTime};
     const bool swayHold = updateSway(dt, velocityIdle);
 
     // With dynamic stability, the legs also wait until the feet that stay down can hold the body's
@@ -345,6 +348,7 @@ void GaitEngine::walk(Scalar dt) {
         targets = walkTargets(forward, left, yaw, ds, moveDt);
     }
     sendFootTargets(targets, dt);
+    walk_advancing = ds > 0;
     updateBalance(dt, dt > 0 ? moveDt / dt : S(0.0));
 
     phase_progress = std::min(S(1.0), phase_progress + ds);

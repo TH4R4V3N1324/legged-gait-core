@@ -138,6 +138,7 @@ GaitParams dynamicStability() {
     GaitParams params;
     params.dynamic_stability = true;
     params.balance_feedback = true;   // and Phase B's on top
+    params.preview_control = true;    // and Phase C's
     return params;
 }
 
