@@ -147,9 +147,12 @@ void GaitEngine::returnToStart(Scalar dt) {
 bool GaitEngine::handleIdleReturn(Scalar dt) {
     constexpr Scalar DEADZONE = S(0.01);
 
-    const bool idle = (std::abs(current_motion_intent.forward) < DEADZONE &&
-                       std::abs(current_motion_intent.left) < DEADZONE &&
-                       std::abs(current_motion_intent.yaw) < DEADZONE);
+    // Idle once nothing is asked for and the body has stopped: slowed down by the gait (dynamic
+    // stability), it isn't idle, nor is it while still slowing down after the command stops
+    auto still = [DEADZONE](const MotionIntent& intent) {
+        return std::abs(intent.forward) < DEADZONE && std::abs(intent.left) < DEADZONE && std::abs(intent.yaw) < DEADZONE;
+    };
+    const bool idle = still(current_motion_intent) && still(requested_intent);
 
     // Track if we've ever moved (received a non-zero command and started stepping)
     if (!idle && phase_progress > 0) {
@@ -302,9 +305,24 @@ void GaitEngine::walk(Scalar dt) {
     // that stay down
     const bool swayHold = updateSway(dt, velocityIdle);
 
+    // With dynamic stability, the legs also wait until the feet that stay down can hold the body's
+    // momentum (the lift gate)
+    lift_held = !velocityIdle && holdLift(dt);
+    if (!lift_held) {
+        lift_speed_scale = 1;
+    }
+    // Held for either, every foot stays down. Without dynamic stability the body stops where it is.
+    // With it, the body keeps moving and slows (limitAcceleration) no harder than the feet can push
+    // for, so the legs about to lift travel with the ground like the rest (they're picked again next tick).
+    const bool held = swayHold || lift_held;
+    const bool bodyStops = velocityIdle || (swayHold && !p.dynamic_stability);
+    if (held && !bodyStops) {
+        leg_swinging.fill(false);
+    }
+
     // Advance, slowing the whole gait if a joint would move faster than its speed limit
-    Scalar ds = (velocityIdle || swayHold) ? S(0.0) : dt / current_phase_duration;
-    Scalar moveDt = (velocityIdle || swayHold) ? S(0.0) : dt;
+    Scalar ds = (velocityIdle || held) ? S(0.0) : dt / current_phase_duration;
+    Scalar moveDt = bodyStops ? S(0.0) : dt;
     auto targets = walkTargets(forward, left, yaw, ds, moveDt);
     const Scalar scale = jointSpeedScale(targets, dt);
     walk_speed_scale = scale;
@@ -314,6 +332,7 @@ void GaitEngine::walk(Scalar dt) {
         targets = walkTargets(forward, left, yaw, ds, moveDt);
     }
     sendFootTargets(targets, dt);
+    updateBalance(dt, dt > 0 ? moveDt / dt : S(0.0));
 
     phase_progress = std::min(S(1.0), phase_progress + ds);
     if (phase_progress >= 1) {

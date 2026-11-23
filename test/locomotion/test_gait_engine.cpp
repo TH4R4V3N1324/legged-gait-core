@@ -454,6 +454,9 @@ gait_core::RobotDefinition quadruped() {
     robot.numGaits = 2;
     robot.gaits[0] = gait_core::GaitPattern::fromGroups("trot", {{0, 2}, {1, 3}});
     robot.gaits[1] = gait_core::GaitPattern::fromGroups("crawl", {{1}, {0}, {2}, {3}});
+    // Its weight exactly at the centre, which these tests' geometry relies on
+    robot.bodyMass = 0;
+    robot.centreOfMass = gait_core::Vec3::Zero();
     return robot;
 }
 
@@ -508,6 +511,7 @@ TEST(GaitEngine, TiltShiftStopsWhereTheCentreOfMassNearsTheEdgeOfTheFeet) {
     // Centre of mass moved forward until it is 30 mm inside the standing feet: a 40 mm forward
     // shift would take it past min_stability_margin (10 mm), so the shift has to stop short
     gait_core::RobotDefinition definition = explorerRobot();
+    definition.bodyMass = 0;   // the whole robot's centre of mass, fixed where this test puts it
     const GaitEngine neutral{GaitParams{}, definition};
     std::array<gait_core::Vec2, gait_core::kMaxLegs> feet;
     for (int i = 0; i < NUM_LEGS; ++i) {
@@ -898,4 +902,174 @@ TEST(GaitEngine, NoJointEverExceedsItsSpeedLimit) {
         run(5.0);
         EXPECT_TRUE(failures.empty()) << "gait " << int(gait) << ", first: " << (failures.empty() ? "" : failures[0]);
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Centre of mass and dynamic stability
+// ---------------------------------------------------------------------------------------------
+
+namespace {
+
+/**
+ * @brief Run a tick at a time, calling check after each
+*/
+template <typename Check>
+void runChecking(Robot& robot, double seconds, Check check) {
+    const int ticks = static_cast<int>(std::lround(seconds / 0.01));
+    for (int i = 0; i < ticks; ++i) {
+        robot.run(0.01);
+        check();
+    }
+}
+
+/**
+ * @brief Params whose min_stability_margin sits just under explorer's tripod margin, so the
+ *        dynamic limits have little to spare
+*/
+GaitParams tightMargins(bool dynamicStability) {
+    const Scalar tripod = GaitEngine(GaitParams{}, explorerRobot()).gaitStabilityMargin(gait_core::explorer::GAIT_TRIPOD);
+    GaitParams params;
+    params.min_stability_margin = tripod - static_cast<Scalar>(0.005);
+    params.dynamic_stability = dynamicStability;
+    return params;
+}
+
+}  // namespace
+
+TEST(GaitEngine, TheCentreOfMassMovesAsTheLegsSwing) {
+    Robot robot = standingRobot();
+    const gait_core::Vec3 standing = robot.engine.centreOfMass();
+    // The legs are two thirds of explorer, so the whole robot's isn't the body's own
+    EXPECT_GT((standing - explorerRobot().centreOfMass).norm(), 0.002);
+    EXPECT_NEAR(standing.y(), 0, 0.002);
+
+    Scalar lowest = standing.x(), highest = standing.x();
+    robot.engine.setVelocity({static_cast<Scalar>(0.15), 0, 0});
+    runChecking(robot, 3.0, [&] {
+        lowest = std::min(lowest, robot.engine.centreOfMass().x());
+        highest = std::max(highest, robot.engine.centreOfMass().x());
+    });
+    EXPECT_GT(highest - lowest, 0.003);
+}
+
+TEST(GaitEngine, WithoutMassesTheCentreOfMassIsFixed) {
+    gait_core::RobotDefinition definition = explorerRobot();
+    definition.bodyMass = 0;
+    definition.centreOfMass = gait_core::Vec3(static_cast<Scalar>(0.01), 0, 0);
+    Robot robot(GaitParams{}, definition);
+    robot.run(3.0);
+    robot.engine.sit(false);
+    robot.run(6.0);
+    robot.engine.setVelocity({static_cast<Scalar>(0.15), 0, 0});
+    runChecking(robot, 2.0, [&] { ASSERT_EQ(robot.engine.centreOfMass(), definition.centreOfMass); });
+}
+
+TEST(GaitEngine, BalanceStateFollowsTheWalk) {
+    Robot robot = standingRobot();
+    const Scalar speed = static_cast<Scalar>(0.08);
+    robot.engine.setVelocity({speed, 0, 0});
+    robot.run(2.0);   // up to speed
+
+    double sum = 0;
+    int ticks = 0;
+    runChecking(robot, 2.2, [&] {   // two tripod cycles, so the legs' own motion averages out
+        const gait_core::BalanceState& s = robot.engine.balanceState();
+        sum += s.comVelocity.x();
+        ++ticks;
+        EXPECT_NEAR(s.omega, std::sqrt(9.81 / s.height), 1e-3);
+        EXPECT_NEAR((s.capturePoint - (s.com.head<2>() + s.comVelocity / s.omega)).norm(), 0, 1e-5);
+        EXPECT_GT(s.captureMargin, 0);
+        EXPECT_GE(s.plantedCount, 3);
+    });
+    EXPECT_NEAR(sum / ticks, speed, 0.015);
+    // The centre of mass sits between the hips and the feet
+    EXPECT_GT(robot.engine.balanceState().height, 0.08);
+    EXPECT_LT(robot.engine.balanceState().height, 0.16);
+}
+
+TEST(GaitEngine, DynamicStabilityLimitsHowHardTheBodySpeedsUp) {
+    // Asking for full speed at once: off, the body takes it in a tick; on, it ramps up
+    auto velocityAfter = [](bool dynamicStability, double seconds) {
+        Robot robot = standingRobot(tightMargins(dynamicStability));
+        robot.engine.setVelocity({static_cast<Scalar>(0.3), 0, 0});
+        robot.run(seconds);
+        return robot.engine.balanceState().comVelocity.x();
+    };
+    const Scalar off = velocityAfter(false, 0.01);
+    const Scalar on = velocityAfter(true, 0.01);
+    EXPECT_GT(off, 0.2);
+    EXPECT_LT(on, 0.6 * off);
+    // It still gets there
+    EXPECT_NEAR(velocityAfter(true, 1.0), velocityAfter(false, 1.0), 0.05);
+}
+
+namespace {
+
+/**
+ * @brief A quadruped crawling at full speed for 6 s, from standing
+ * @param[out] worstZmp The ZMP's smallest margin inside the planted feet on the way (m)
+ * @param[out] heldTicks How many ticks a lift was held
+ * @return The distance walked (m)
+*/
+Scalar crawl(bool dynamicStability, Scalar& worstZmp, int& heldTicks) {
+    GaitParams params;
+    params.allow_unstable_gaits = true;   // its trot is, not its crawl
+    params.dynamic_stability = dynamicStability;
+    Robot robot(params, quadruped());
+    robot.run(3.0);
+    robot.engine.sit(false);
+    robot.run(6.5);
+    robot.engine.setGait(1);
+    robot.engine.setVelocity({static_cast<Scalar>(0.3), 0, 0});
+    worstZmp = 1;
+    heldTicks = 0;
+    runChecking(robot, 6.0, [&] {
+        worstZmp = std::min(worstZmp, robot.engine.balanceState().zmpMargin);
+        heldTicks += robot.engine.liftHeld() ? 1 : 0;
+    });
+    return robot.engine.odometry().x();
+}
+
+}  // namespace
+
+TEST(GaitEngine, DynamicStabilityKeepsACrawlsZmpInsideItsFeet) {
+    Scalar worstOff, worstOn;
+    int heldOff, heldOn;
+    const Scalar walkedOff = crawl(false, worstOff, heldOff);
+    const Scalar walkedOn = crawl(true, worstOn, heldOn);
+    // Off, a full speed crawl lifts legs the body's momentum can't do without: the ZMP leaves the feet
+    EXPECT_LT(worstOff, 0);
+    EXPECT_EQ(heldOff, 0);
+    // On, lifts wait for it to fit, and it stays inside
+    EXPECT_GT(heldOn, 0);
+    EXPECT_GT(worstOn, 0.005);
+    // At little cost in speed
+    EXPECT_GT(walkedOn, 0.85 * walkedOff);
+}
+
+TEST(GaitEngine, DynamicStabilityChangesNothingForExplorersTripod) {
+    // A wide hexapod's lifts always fit: its walk is the same with or without
+    auto walk = [](bool dynamicStability) {
+        GaitParams params;
+        params.dynamic_stability = dynamicStability;
+        Robot robot = standingRobot(params);
+        robot.engine.setVelocity({static_cast<Scalar>(0.15), 0, 0});
+        bool held = false;
+        runChecking(robot, 4.0, [&] { held = held || robot.engine.liftHeld(); });
+        EXPECT_FALSE(held);
+        return robot.engine.odometry().x();
+    };
+    EXPECT_NEAR(walk(true), walk(false), 0.01);
+}
+
+TEST(GaitEngine, DynamicStabilityStillWalksAndTurns) {
+    GaitParams params;
+    params.dynamic_stability = true;
+    Robot robot = standingRobot(params);
+    robot.engine.setVelocity({static_cast<Scalar>(0.1), 0, 0});
+    robot.run(4.0);
+    EXPECT_GT(robot.engine.odometry().x(), 0.25);
+    robot.engine.setVelocity({0, 0, static_cast<Scalar>(0.3)});
+    robot.run(4.0);
+    EXPECT_GT(robot.engine.odometry().yaw(), 0.5);
 }

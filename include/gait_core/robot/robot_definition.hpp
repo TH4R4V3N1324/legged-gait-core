@@ -27,7 +27,10 @@ struct RobotDefinition {
 
     // m, body frame: where the robot's weight acts. The engine keeps it over the planted feet
     // (see GaitParams::min_stability_margin). The body origin is a fair guess for a symmetric robot.
+    // With masses given (bodyMass > 0), this is the body's own, without its legs: the engine adds
+    // each leg's links (JointDefinition::mass) where the joints put them, every tick.
     Vec3 centreOfMass = Vec3::Zero();
+    Scalar bodyMass = 0;   // kg, the body without its legs; 0: no masses, centreOfMass is the whole robot's and fixed
 
     // The gaits it can walk in, selected by index (the protocol's and ROS's gait id). Each must
     // time exactly numLegs legs; the engine won't move a robot with a gait it can't run.

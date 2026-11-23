@@ -229,8 +229,11 @@ namespace {
  * @brief Run one of the other test robots through walking, turning, stopping, tilt and sitting
  * @return The allocations made after it stood up
 */
-long allocationsRunning(const gait_core::RobotDefinition& robot, double speed, bool sits) {
-    GaitEngine engine{gait_core::GaitParams{}, robot};
+long allocationsRunning(const gait_core::RobotDefinition& robot, double speed, bool sits,
+                        bool dynamicStability = false) {
+    gait_core::GaitParams params;
+    params.dynamic_stability = dynamicStability;
+    GaitEngine engine{params, robot};
     engine.log = [](LogLevel, const char*) { ++logged; };
     JointFeedback feedback;
     for (int leg = 0; leg < robot.numLegs; ++leg) {
@@ -280,6 +283,11 @@ long allocationsRunning(const gait_core::RobotDefinition& robot, double speed, b
 
 TEST(NoHeap, AQuadrupedSwayingNeverAllocates) {
     EXPECT_EQ(allocationsRunning(test_robots::quadruped(), 0.03, true), 0);
+}
+
+TEST(NoHeap, DynamicStabilityNeverAllocates) {
+    EXPECT_EQ(allocationsRunning(test_robots::quadruped(), 0.1, true, true), 0);
+    EXPECT_EQ(allocationsRunning(explorerRobot(), 0.15, true, true), 0);
 }
 
 TEST(NoHeap, FourJointLegsNeverAllocate) {

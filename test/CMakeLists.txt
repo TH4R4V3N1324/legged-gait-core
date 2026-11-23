@@ -21,7 +21,9 @@ set(GAIT_TESTS
   kinematics/test_chain_kinematics
   kinematics/test_foot_force
   kinematics/test_kinematics
+  kinematics/test_mass_properties
   kinematics/test_yaw_pitch_pitch_leg
+  locomotion/test_balance_controller
   locomotion/test_body_pose
   locomotion/test_foot_directions
   locomotion/test_gait_engine

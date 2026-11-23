@@ -1,5 +1,7 @@
 #include "gait_engine_internal.hpp"
 
+#include "gait_core/kinematics/mass_properties.hpp"
+
 // GaitEngine is one class split by area: this file builds it and holds the shared pieces
 // (per-leg kinematics, logging, reach checks). The rest:
 //   gait_engine_inputs.cpp    IMU, joint states, foot forces, leg odometry
@@ -85,6 +87,16 @@ GaitEngine::GaitEngine(const GaitParams& params, const RobotDefinition& geometry
             leg_solver[legNum] = LegSolver::Chain;
         }
         // A default JointVec is empty, not zero: size every leg's command to its joint count
+        output.joints[legNum] = JointVec::Zero(kinematics(legNum).numJoints());
+    }
+    // The gaits' margins are judged with the legs in their standing stance
+    for (int legNum = 0; legNum < numLegs(); ++legNum) {
+        JointVec stance;
+        kinematics(legNum).ik(config().startPosition[legNum], output.joints[legNum], stance);
+        output.joints[legNum] = stance;
+    }
+    com = liveCentreOfMass();
+    for (int legNum = 0; legNum < numLegs(); ++legNum) {
         output.joints[legNum] = JointVec::Zero(kinematics(legNum).numJoints());
     }
     for (int gait = 0; gait < config().numGaits(); ++gait) {
@@ -219,7 +231,28 @@ Scalar GaitEngine::plantedMargin(const std::array<Vec3, kMaxLegs>& feet, const V
             planted[count++] = trajectoryGen.legToBody(legNum, feet[legNum]).head<2>();
         }
     }
-    return stabilityMargin(planted.data(), count, robot.centreOfMass.head<2>() + bodySway);
+    return stabilityMargin(planted.data(), count, com.head<2>() + bodySway);
+}
+
+/**
+ * @brief The whole robot's centre of mass, with each leg where its joints were last commanded
+ * @return Body frame (m). RobotDefinition::centreOfMass if the robot gives no masses (bodyMass 0).
+ * @note Uses each leg's definition with output.joints, so a leg given other kinematics with a
+ *       different joint count adds nothing.
+*/
+Vec3 GaitEngine::liveCentreOfMass() const {
+    if (!(robot.bodyMass > 0)) {
+        return robot.centreOfMass;
+    }
+    MassMoment total;
+    total.add(robot.bodyMass, robot.centreOfMass);
+    for (int legNum = 0; legNum < numLegs(); ++legNum) {
+        const MassMoment leg = legMass(robot.legs[legNum], output.joints[legNum]);
+        if (leg.mass > 0) {
+            total.add(leg.mass, trajectoryGen.legToBody(legNum, leg.centre()));
+        }
+    }
+    return total.centre(robot.centreOfMass);
 }
 
 /**
@@ -308,13 +341,13 @@ bool GaitEngine::updateSway(Scalar dt, bool idle) {
             feet[count++] = trajectoryGen.legToBody(legNum, current_leg_positions[legNum]).head<2>();
         }
     }
-    const Vec2 com = robot.centreOfMass.head<2>();   // body frame; over the ground it's com + sway
+    const Vec2 centre = com.head<2>();   // body frame; over the ground it's centre + sway
     Vec2 goal = Vec2::Zero();
     if (!(idle && phase_progress == 0)) {
         Vec2 target;
-        nearestStablePoint(feet.data(), count, com + sway,
+        nearestStablePoint(feet.data(), count, centre + sway,
                            std::max(p.sway_margin, p.min_stability_margin), target);
-        goal = target - com;
+        goal = target - centre;
     }
     easeSway(goal, dt);
 
@@ -322,7 +355,7 @@ bool GaitEngine::updateSway(Scalar dt, bool idle) {
         sway_hold_time = 0;
         return false;
     }
-    if (stabilityMargin(feet.data(), count, com + sway) >= p.min_stability_margin) {
+    if (stabilityMargin(feet.data(), count, centre + sway) >= p.min_stability_margin) {
         sway_hold_time = 0;
         return false;
     }

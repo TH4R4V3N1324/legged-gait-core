@@ -130,6 +130,46 @@ TEST(TwoJointLegs, LiveALife) {
     }
 }
 
+// ---- The same lives with dynamic stability on ------------------------------------------------------
+
+namespace {
+
+GaitParams dynamicStability() {
+    GaitParams params;
+    params.dynamic_stability = true;
+    return params;
+}
+
+}  // namespace
+
+TEST(Explorer, LivesALifeWithDynamicStability) {
+    SimRobot robot{explorerRobot(), dynamicStability()};
+    liveALife(robot, 0.08);
+    EXPECT_TRUE(robot.warnings.empty()) << joined(robot.warnings);
+}
+
+TEST(Quadruped, LivesALifeWithDynamicStability) {
+    SimRobot robot{test_robots::quadruped(), dynamicStability()};
+    liveALife(robot, 0.03);
+    EXPECT_TRUE(robot.warnings.empty()) << joined(robot.warnings);
+}
+
+TEST(FourJointLegs, LiveALifeWithDynamicStability) {
+    SimRobot robot{test_robots::fourJointHexapod(), dynamicStability()};
+    liveALife(robot, 0.08);
+    EXPECT_TRUE(robot.warnings.empty()) << joined(robot.warnings);
+}
+
+TEST(TwoJointLegs, LiveALifeWithDynamicStability) {
+    SimRobot robot{test_robots::twoJointHexapod(), dynamicStability()};
+    liveALife(robot, 0.05, false);
+    for (const std::string& warning : robot.warnings) {
+        const bool expected = warning.find("straight to the standing pose") != std::string::npos ||
+            warning.find("Tilt pose limited") != std::string::npos || warning.find("Refused to sit") != std::string::npos;
+        EXPECT_TRUE(expected) << warning;
+    }
+}
+
 TEST(FourJointLegs, StandBackInTheSamePoseWhereverTheyWalked) {
     // Four joints reach each foot position many ways. Walking and stepping back to the stance must
     // still end in the pose the legs started in, not wherever the path left the spare joint.

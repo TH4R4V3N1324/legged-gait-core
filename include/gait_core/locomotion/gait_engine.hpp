@@ -6,6 +6,7 @@
 #include <functional>
 #include <optional>
 
+#include "gait_core/locomotion/balance_controller.hpp"
 #include "gait_core/locomotion/gait_config.hpp"
 #include "gait_core/kinematics/yaw_pitch_pitch_leg.hpp"
 #include "gait_core/estimation/leg_odometry.hpp"
@@ -98,6 +99,14 @@ struct GaitParams {
     bool walk_leveling = true;          // hold the body level with the IMU while walking
     Scalar walk_level_gain = Scalar(2.0);       // 1/s, how fast the correction responds
     Scalar walk_max_angle = Scalar(0.15);       // rad, largest roll or pitch correction
+
+    // Dynamic stability (live): the body as an inverted pendulum over its feet, from what the gait
+    // commands (see BalanceController). On, the body speeds up or slows down no harder than the
+    // planted feet can push for (the ZMP stays min_stability_margin inside them), and a leg only
+    // lifts once the capture point and the ZMP are that far inside the feet that stay down, the body
+    // slowing until they are. Off, the same quantities are still worked out for balanceState().
+    bool dynamic_stability = false;
+    Scalar com_acceleration_filter = Scalar(0.05);  // s, low-pass time constant of the centre of mass acceleration
 };
 
 enum class SitState : uint8_t {
@@ -270,6 +279,14 @@ public:
     const Vec3& imuAngularVelocity() const { return body_angular_velocity; }   // rad/s, body frame
     const Vec3& imuLinearAcceleration() const { return body_linear_acceleration; }   // m/s^2, body frame, gravity included
     bool controllerTiltActive() const { return controller_tilt_active; }
+    // m, body frame: the whole robot's centre of mass with the legs where they were last commanded
+    // (RobotDefinition::centreOfMass if the robot gives no masses)
+    const Vec3& centreOfMass() const { return com; }
+    // The body as an inverted pendulum while walking: centre of mass, its commanded velocity and
+    // acceleration, height, capture point, ZMP and their margins (see dynamic_stability)
+    const BalanceState& balanceState() const { return balance_controller.state(); }
+    // Whether a leg is waiting to lift until the body's momentum fits the feet that stay down
+    bool liftHeld() const { return lift_held; }
 
     // ---- Hooks ------------------------------------------------------------------------------
     std::function<void(LogLevel, const char*)> log;           // optional
@@ -431,6 +448,21 @@ private:
     Scalar tilt_saved_pitch = Scalar(0);
     std::array<Vec3, kMaxLegs> tilt_saved_feet;
 
+    // Centre of mass and dynamic stability
+    Vec3 com = Vec3::Zero();               // m, body frame: live, see centreOfMass()
+    BalanceController balance_controller;
+    MotionIntent applied_intent{};         // the velocity actually walked, acceleration limited
+    MotionIntent requested_intent{};       // the command it heads for, before limiting: idle only when both are
+    bool lift_held = false;                // the phase's legs are waiting to lift
+    Scalar lift_speed_scale = 1;           // while held, the share of the command the capture point fits
+    Scalar lift_hold_time = 0;             // s they have waited
+    Vec3 liveCentreOfMass() const;
+    void limitAcceleration(Scalar dt);
+    bool holdLift(Scalar dt);
+    void updateBalance(Scalar dt, Scalar moveScale);
+    void resetBalance();
+    int plantedFeet(std::array<Vec2, kMaxLegs>& feet, bool staying) const;
+
     // Leg odometry
     LegOdometry legOdometry;
     std::array<Vec2, kMaxLegs> previous_feet;
@@ -445,8 +477,8 @@ private:
     bool has_previous_feet = false;
 
     // Throttled log messages: when each was last sent
-    std::array<Timestamp, 9> last_throttled_log{};
-    std::array<bool, 9> throttled_log_sent{};
+    std::array<Timestamp, 10> last_throttled_log{};
+    std::array<bool, 10> throttled_log_sent{};
 
     std::array<Scalar, kMaxGaits> gait_margin{};   // gaitStabilityMargin, worked out once
     std::array<bool, kMaxGaits> gait_sways{};      // gaitSways

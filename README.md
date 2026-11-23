@@ -34,9 +34,9 @@ controllers can use them too.
 
 | Header | Contents |
 | --- | --- |
-| `robot_definition.hpp` | `RobotDefinition`: the legs (`numLegs`, up to `GAIT_CORE_MAX_LEGS`), neutral stance, max stride, centre of mass and gaits |
+| `robot_definition.hpp` | `RobotDefinition`: the legs (`numLegs`, up to `GAIT_CORE_MAX_LEGS`), neutral stance, max stride, centre of mass, body mass and gaits. With masses given (`bodyMass` > 0), `centreOfMass` is the body's own and the engine adds the legs' links where the joints put them; without, it's the whole robot's and fixed |
 | `leg_definition.hpp` | `LegDefinition`: where the leg is mounted, its joint chain, the foot, which solver to use (`LegSolver`), and its own `stanceOffset` from the shared stance |
-| `joint_definition.hpp` | `JointDefinition`: a revolute joint's origin, axis and limits |
+| `joint_definition.hpp` | `JointDefinition`: a revolute joint's origin, axis, limits and speed limit, and the mass and centre of mass of the link it turns (as a URDF `<inertial>` gives them) |
 | `gait_pattern.hpp` | `GaitPattern`: a gait as a duty factor and per-leg offsets (`fromGroups` for groups that take turns); `GaitSchedule`, the phases the engine runs it as |
 
 ### Kinematics (`kinematics/`)
@@ -45,6 +45,7 @@ controllers can use them too.
 | --- | --- |
 | `leg_kinematics.hpp` | `LegKinematics`: FK, IK from a seed, Jacobian, and foot force from joint torques, for any number of joints |
 | `chain_kinematics.hpp` | `ChainKinematics`: any `LegDefinition`, with exact FK/Jacobian and numerical IK (damped least squares) |
+| `mass_properties.hpp` | `legMass`: a leg's links' total mass and first moment for some joint angles; `MassMoment` adds them up into a centre of mass |
 | `yaw_pitch_pitch_leg.hpp` | `YawPitchPitchLeg`: exact analytic kinematics for a yaw joint then two pitch joints (coxa/femur/tibia) |
 
 ### Locomotion (`locomotion/`)
@@ -55,6 +56,7 @@ controllers can use them too.
 | `gait_config.hpp` | The robot's gaits and the current one, modes, neutral stance, height/reach |
 | `trajectory_generator.hpp` | Swing Béziers, stance lines, foot displacement, body pose |
 | `support_polygon.hpp` | `stabilityMargin`: how far a point (the centre of mass) is inside the convex hull of some planted feet. `deepestSupportPoint` and `nearestStablePoint` for where to move it. The engine refuses a robot whose gaits fall below `min_stability_margin` (unless `allow_unstable_gaits`), stops tilt-mode body shifts at it, and warns when walking leaves it. A gait that is only stable with the body moved over its feet, such as a quadruped crawl, sways the body before each leg lifts (`body_sway`); gaits stable without it, such as explorer's, never sway. Judged in the body frame, so no IMU is needed |
+| `balance_controller.hpp` | `BalanceController`: the body as a linear inverted pendulum over its planted feet, from what the gait commands. Each walking tick it takes the live centre of mass c and works out its velocity and acceleration, the height h and ω = √(g/h), the capture point ξ = c + ċ/ω and the ZMP c − c̈/ω², with how far each is inside the feet. `canLift` checks ξ and the ZMP against the feet left down when a leg lifts; `accelerationScale` caps acceleration at ω² × the spare margin; `velocityScale` gives the speed whose ξ fits some feet. With `dynamic_stability` on, the engine uses all three: the body speeds up and slows down no harder than the feet can push for, and a leg only lifts once the body's momentum fits the feet that stay down, the body slowing just enough until it does. Off (the default), the same state is still worked out for `GaitEngine::balanceState()`. On explorer's wide tripod nothing changes; a quadruped's crawl keeps its ZMP inside its feet, which it otherwise leaves at full speed |
 | `frame_converter.hpp` | Leg frame ↔ body frame |
 
 ### Estimation (`estimation/`)
@@ -67,7 +69,7 @@ controllers can use them too.
 
 | Header | Contents |
 | --- | --- |
-| `explorer.hpp` | Explorer, a hexapod: `gait_core::explorer::robot()`, and names for its legs (`LEG_FRONT_RIGHT` …) and gaits (`GAIT_TRIPOD`, `GAIT_RIPPLE`, `GAIT_WAVE`) |
+| `explorer.hpp` | Explorer, a hexapod: `gait_core::explorer::robot()` (with its CAD masses: 3.32 kg, two thirds of it in the legs), and names for its legs (`LEG_FRONT_RIGHT` …) and gaits (`GAIT_TRIPOD`, `GAIT_RIPPLE`, `GAIT_WAVE`) |
 
 #### Other robots
 

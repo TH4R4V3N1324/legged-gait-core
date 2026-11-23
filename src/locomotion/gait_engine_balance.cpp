@@ -25,12 +25,12 @@ bool GaitEngine::tiltFeasible(const BodyPose& pose, std::array<Vec3, kMaxLegs>& 
     }
     // The centre of mass stays over the feet, judged in the frame the body stood in when tilt mode
     // began (the feet don't move; the body is posed above them)
-    const Vec3 com = trajectoryGen.unposedBodyPoint(robot.centreOfMass, pose);
+    const Vec3 centre = trajectoryGen.unposedBodyPoint(com, pose);
     std::array<Vec2, kMaxLegs> feet;
     for (int legNum = 0; legNum < numLegs(); ++legNum) {
         feet[legNum] = trajectoryGen.legToBody(legNum, tilt_ground_feet[legNum]).head<2>();
     }
-    return stabilityMargin(feet.data(), numLegs(), com.head<2>()) >= p.min_stability_margin;
+    return stabilityMargin(feet.data(), numLegs(), centre.head<2>()) >= p.min_stability_margin;
 }
 
 /**
@@ -144,6 +144,151 @@ void GaitEngine::updateWalkLeveling(Scalar dt) {
     walk_level_roll = roll;
     walk_level_pitch = pitch;
     walk_level = TrajectoryGenerator::rotationAbout(roll, pitch, pivot);
+}
+
+/**
+ * @brief The feet on the ground this tick (body frame, x and y)
+ * @param[out] feet Each planted foot
+ * @param[in] staying true: only those that stay down when this phase's legs lift (for the lift gate).
+ *            false: every foot not mid-swing (at a phase's start the next legs are still down)
+ * @return How many
+*/
+int GaitEngine::plantedFeet(std::array<Vec2, kMaxLegs>& feet, bool staying) const {
+    int count = 0;
+    for (int legNum = 0; legNum < numLegs(); ++legNum) {
+        const bool up = staying ? leg_swinging[legNum] : (leg_swinging[legNum] && phase_progress > 0);
+        if (!up) {
+            feet[count++] = trajectoryGen.legToBody(legNum, current_leg_positions[legNum]).head<2>();
+        }
+    }
+    return count;
+}
+
+/**
+ * @brief Walk at the commanded velocity no faster than the feet can push for
+ * @param[in] dt The time since the last tick (s)
+ * @note With dynamic_stability on, the velocity walked (applied_intent) moves towards the command,
+ *       capped at the gait's top speed, by as much of the change as keeps the ZMP inside the planted
+ *       feet: accelerating at a moves it a / omega^2 behind the centre of mass, so the most the body
+ *       can take is omega^2 times the spare margin behind it. While a lift is held it slows to the
+ *       speed the feet left down can stop it from, and while waiting for the body to sway it slows to a stop. The result replaces current_motion_intent, so idling, stride and phase length
+ *       all follow the velocity actually walked. Off, it walks the command as before.
+*/
+void GaitEngine::limitAcceleration(Scalar dt) {
+    requested_intent = current_motion_intent;
+    // Capped at the gait's top speed, as walk() caps it
+    MotionIntent wanted = current_motion_intent;
+    if (p.dynamic_stability && sway_holding) {
+        wanted = MotionIntent{};   // waiting for the body to sway over the feet: come to a stop
+    } else if (p.dynamic_stability && lift_held) {
+        // Down to the speed whose capture point the feet left down can take
+        wanted.forward = applied_intent.forward * lift_speed_scale;
+        wanted.left = applied_intent.left * lift_speed_scale;
+        wanted.yaw = applied_intent.yaw * lift_speed_scale;
+    }
+    const Scalar footSpeed = std::hypot(wanted.forward, wanted.left) + std::abs(wanted.yaw) * trajectoryGen.maxBodyRadius();
+    const Scalar maxSpeed = maxFootSpeed();
+    if (footSpeed > maxSpeed) {
+        const Scalar scale = maxSpeed / footSpeed;
+        wanted.forward *= scale;
+        wanted.left *= scale;
+        wanted.yaw *= scale;
+    }
+    if (!p.dynamic_stability || !(dt > 0)) {
+        applied_intent = wanted;   // only reported (balanceState): walk() caps the command itself
+        return;
+    }
+    // Just back from tilt mode or sitting, the pendulum has no state yet: take it from here
+    if (!(balance_controller.state().omega > 0)) {
+        updateBalance(dt, 0);
+    }
+    const Scalar dForward = wanted.forward - applied_intent.forward;
+    const Scalar dLeft = wanted.left - applied_intent.left;
+    const Scalar dYaw = wanted.yaw - applied_intent.yaw;
+    // The change at the centre of mass: turning faster carries it round the body origin
+    const Vec2 c = com.head<2>() + sway;
+    const Vec2 acceleration(dForward - dYaw * c.y(), dLeft + dYaw * c.x());
+    std::array<Vec2, kMaxLegs> feet;
+    const int count = plantedFeet(feet, false);
+    const Scalar scale = balance_controller.accelerationScale(acceleration / dt, feet.data(), count, p.min_stability_margin);
+    applied_intent.forward += scale * dForward;
+    applied_intent.left += scale * dLeft;
+    applied_intent.yaw += scale * dYaw;
+    current_motion_intent = applied_intent;
+}
+
+/**
+ * @brief The lift gate: whether this phase's legs must wait before lifting
+ * @param[in] dt The time since the last tick (s)
+ * @return true to hold them down this tick
+ * @note Only at a phase's start, with dynamic_stability on: the capture point and the ZMP must be
+ *       min_stability_margin inside the feet that stay down (see BalanceController::canLift), so the
+ *       polygon left after the lift can still hold the body's momentum. While held, the body slows
+ *       (limitAcceleration) to the speed whose capture point fits those feet (velocityScale), no
+ *       further, which brings both back over them. Gives up after a few phases' length, with a warning.
+*/
+bool GaitEngine::holdLift(Scalar dt) {
+    if (!p.dynamic_stability || phase_progress > 0) {
+        lift_hold_time = 0;
+        return false;
+    }
+    std::array<Vec2, kMaxLegs> feet;
+    const int count = plantedFeet(feet, true);
+    if (balance_controller.canLift(feet.data(), count, p.min_stability_margin)) {
+        lift_hold_time = 0;
+        return false;
+    }
+    lift_speed_scale = balance_controller.velocityScale(feet.data(), count, p.min_stability_margin);
+    lift_hold_time += dt;
+    const Scalar maxHold = 3 * p.phase_duration;
+    if (lift_hold_time > maxHold) {
+        emitThrottled(LOG_LIFT_HOLD_TIMEOUT, 5, LogLevel::Warn,
+            "Legs held down %.1f s waiting for the body's momentum to fit the feet that stay down "
+            "(capture point %.0f mm, ZMP %.0f mm inside all the feet): lifting anyway",
+            static_cast<double>(lift_hold_time), static_cast<double>(balance_controller.state().captureMargin * 1000),
+            static_cast<double>(balance_controller.state().zmpMargin * 1000));
+        return false;
+    }
+    return true;
+}
+
+/**
+ * @brief Update the centre of mass and the inverted pendulum after a walking tick
+ * @param[in] dt The time since the last tick (s)
+ * @param[in] moveScale How much of this tick the body moved at applied_intent (moveDt / dt): 0
+ *            while idle or holding for sway
+ * @note Always runs while walking, for balanceState(); dynamic_stability only decides whether the
+ *       gait acts on it.
+*/
+void GaitEngine::updateBalance(Scalar dt, Scalar moveScale) {
+    com = liveCentreOfMass();
+    std::array<Vec2, kMaxLegs> feet;
+    const int count = plantedFeet(feet, false);
+    Scalar footHeight = 0;
+    int heights = 0;
+    for (int legNum = 0; legNum < numLegs(); ++legNum) {
+        if (!(leg_swinging[legNum] && phase_progress > 0)) {
+            footHeight += trajectoryGen.legToBody(legNum, current_leg_positions[legNum]).z();
+            ++heights;
+        }
+    }
+    footHeight = heights > 0 ? footHeight / static_cast<Scalar>(heights) : config().currentHeight;
+    const Vec3 centre(com.x() + sway.x(), com.y() + sway.y(), com.z());
+    const Vec2 bodyVelocity = moveScale * Vec2(applied_intent.forward - applied_intent.yaw * centre.y(),
+                                               applied_intent.left + applied_intent.yaw * centre.x());
+    balance_controller.update(dt, centre, bodyVelocity, feet.data(), count, footHeight, p.com_acceleration_filter);
+}
+
+/**
+ * @brief Forget the walking motion: tilt mode and sitting start and end at rest
+*/
+void GaitEngine::resetBalance() {
+    balance_controller.reset();
+    applied_intent = MotionIntent{};
+    requested_intent = MotionIntent{};
+    lift_held = false;
+    lift_hold_time = 0;
+    lift_speed_scale = 1;
 }
 
 /**

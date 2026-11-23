@@ -80,6 +80,14 @@ GaitOutput GaitEngine::update(Scalar dt, Timestamp now) {
         }
     }
 
+    // The centre of mass with the legs where they were last sent
+    com = liveCentreOfMass();
+
+    // Only walking moves the body over the ground: tilt mode and sitting start from rest
+    if (config().currentMode == MODE_TILT || tilt_active || sit_state != SitState::STANDING) {
+        resetBalance();
+    }
+
     // Tilt mode, or easing the body back to neutral after leaving it
     if (config().currentMode == MODE_TILT || tilt_active) {
         tilt(dt, config().currentMode != MODE_TILT);
@@ -110,6 +118,7 @@ GaitOutput GaitEngine::update(Scalar dt, Timestamp now) {
             emitThrottled(LOG_INVALID_MODE, 1, LogLevel::Warn, "Invalid or unimplemented mode");
             break;
     }
+    limitAcceleration(dt);
     updateWalkLeveling(dt);
     walk(dt);
     return output;
