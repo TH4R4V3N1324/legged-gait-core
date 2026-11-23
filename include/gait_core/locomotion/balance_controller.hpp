@@ -19,9 +19,21 @@ struct BalanceState {
     Vec2 capturePoint = Vec2::Zero();      // m, xi = c + c dot / omega: where the body could come to rest
     Vec2 zmp = Vec2::Zero();               // m, c - c double dot / omega^2: where the feet must push from
     int plantedCount = 0;                  // feet on the ground
+    bool supportArea = false;              // whether they make a polygon with an inside (three or more, not in a line)
     Scalar comMargin = 0;                  // m
     Scalar captureMargin = 0;              // m
     Scalar zmpMargin = 0;                  // m
+
+    // Measured (Phase B), from measure(); until it's called, the commanded values above
+    Vec2 measuredVelocity = Vec2::Zero();       // m/s, c dot as measured (leg odometry and IMU)
+    Vec2 measuredCapturePoint = Vec2::Zero();   // m, c + measured c dot / omega
+    bool hasCentreOfPressure = false;           // whether foot forces gave one
+    Vec2 centreOfPressure = Vec2::Zero();       // m, where the feet are measured pushing from
+    Scalar copMargin = 0;                       // m, how far it is inside the feet
+    Scalar delay = 0;                           // s, the loop delay the prediction covers
+    Vec2 predictedCapturePoint = Vec2::Zero();  // m, the measured capture point once the delay has passed
+    Scalar predictedCaptureMargin = 0;          // m, how far that is inside the feet
+    Vec2 captureError = Vec2::Zero();           // m, the measured capture point less the commanded one, after the delay
 };
 
 /**
@@ -39,7 +51,11 @@ struct BalanceState {
  *       canLift() checks both against the feet left down when a leg lifts, and
  *       accelerationScale() turns the ZMP round: accelerating by a moves the ZMP by a / omega^2,
  *       so the most the body can take is omega^2 times the spare margin behind it.
- *       Allocates nothing; a plain value type.
+ *
+ *       Feet with no area between them (fewer than three, or in a line, like a trot's diagonal pair)
+ *       have no inside to keep anything in, so those checks don't hold anything back: such a gait
+ *       balances by its motion, which needs that motion planned (preview control), as the static
+ *       checks leave it to allow_unstable_gaits. Allocates nothing; a plain value type.
 */
 class BalanceController {
 public:
@@ -91,14 +107,54 @@ public:
     Scalar velocityScale(const Vec2* feet, int count, Scalar margin) const;
 
     /**
+     * @brief Add what was measured to this tick's update (Phase B)
+     * @param[in] measuredVelocity c dot as measured: the body's velocity over the ground plus the
+     *            centre of mass moving within it (m/s, body frame)
+     * @param[in] centreOfPressure Where the feet are measured pushing from (body frame), or null
+     * @param[in] feet The feet in contact (body frame, x and y)
+     * @param[in] count How many
+     * @param[in] delay s from measuring to the feet acting on it: sensing, filtering, the servos
+     * @note The capture point runs away from where the feet push: xi(t + d) = p + (xi - p) e^(omega d),
+     *       p being the centre of pressure if measured, otherwise the ZMP. So an error grows by
+     *       e^(omega d) before anything can act on it (30 ms on explorer: about 30%). The error is
+     *       the measured capture point less the commanded one, both carried over the delay the same way.
+    */
+    void measure(const Vec2& measuredVelocity, const Vec2* centreOfPressure, const Vec2* feet, int count, Scalar delay);
+
+    /**
+     * @brief The change in c dot that would put the capture point back where it's commanded
+     * @param[in] gain Share of the error to correct (0..1): 1 cancels it at once
+     * @param[in] deadband m, an error this small is left alone (and this much less of a larger one)
+     * @return m/s, body frame: -gain x omega x error. Changing c dot by v moves xi by v / omega, so
+     *         gain 1 cancels the error; the feet make it happen by pushing from past xi (the body
+     *         shifted over them), which is what accelerationScale limits.
+    */
+    Vec2 correctionVelocity(Scalar gain, Scalar deadband) const;
+
+    /**
+     * @brief How far from its commanded place the capture point will be when a swing lands
+     * @param[in] timeToTouchdown s until the swinging feet land
+     * @return m, body frame: the capture point error carried on to touchdown, error x e^(omega t):
+     *         landing that much further along puts the feet where the body is really heading
+    */
+    Vec2 touchdownOffset(Scalar timeToTouchdown) const;
+
+    /**
      * @brief Back to rest: the next update starts the velocity and acceleration afresh
     */
     void reset();
 
     const BalanceState& state() const { return state_; }
 
+    /**
+     * @brief Whether some feet enclose an area: three or more, not in a line
+     * @note Judged by the largest circle inside them (deepestSupportPoint), at least MIN_AREA_RADIUS
+    */
+    static bool hasArea(const Vec2* feet, int count);
+
     static constexpr Scalar GRAVITY = Scalar(9.81);    // m/s^2
     static constexpr Scalar MIN_HEIGHT = Scalar(0.01); // m, h is never taken as less (seated, or no feet)
+    static constexpr Scalar MIN_AREA_RADIUS = Scalar(0.002);  // m, a polygon thinner than this counts as a line
 
 private:
     Scalar scaleAlong(const Vec2& shift, const Vec2* feet, int count, Scalar margin) const;

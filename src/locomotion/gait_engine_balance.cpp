@@ -154,14 +154,60 @@ void GaitEngine::updateWalkLeveling(Scalar dt) {
  * @return How many
 */
 int GaitEngine::plantedFeet(std::array<Vec2, kMaxLegs>& feet, bool staying) const {
+    const bool contact = contactPolygon();
     int count = 0;
     for (int legNum = 0; legNum < numLegs(); ++legNum) {
-        const bool up = staying ? leg_swinging[legNum] : (leg_swinging[legNum] && phase_progress > 0);
+        bool up = staying ? leg_swinging[legNum] : (leg_swinging[legNum] && phase_progress > 0);
+        if (contact) {
+            // A foot commanded down but hanging over a gap holds nothing up
+            up = up || !foot_contact[legNum];
+        }
         if (!up) {
-            feet[count++] = trajectoryGen.legToBody(legNum, current_leg_positions[legNum]).head<2>();
+            const Vec3& foot = contact ? measured_leg_positions[legNum] : current_leg_positions[legNum];
+            feet[count++] = trajectoryGen.legToBody(legNum, foot).head<2>();
         }
     }
     return count;
+}
+
+/**
+ * @brief Whether the support polygon is the feet in contact, rather than those commanded down
+ * @return true with balance_feedback on, foot forces that can be trusted, and at least three of the
+ *         feet commanded down in contact: fewer can't make a polygon, which would leave nothing the
+ *         body could do, so it's more likely the force estimates than the robot balancing on two feet
+*/
+bool GaitEngine::contactPolygon() const {
+    if (!p.balance_feedback || !has_foot_forces) {
+        return false;
+    }
+    Scalar total = 0;
+    int touching = 0;
+    for (int legNum = 0; legNum < numLegs(); ++legNum) {
+        total += std::max(S(0.0), foot_forces[legNum].z());
+        const bool down = !(leg_swinging[legNum] && phase_progress > 0);
+        touching += down && foot_contact[legNum] ? 1 : 0;
+    }
+    return total > 3 * p.contact_force_on && touching >= 3;
+}
+
+/**
+ * @brief Where the feet are measured pushing from: each foot weighted by its vertical force
+ * @param[out] cop The centre of pressure (body frame, x and y)
+ * @return false without foot forces to trust
+*/
+bool GaitEngine::centreOfPressure(Vec2& cop) const {
+    if (!contactPolygon()) {
+        return false;
+    }
+    Vec2 moment = Vec2::Zero();
+    Scalar total = 0;
+    for (int legNum = 0; legNum < numLegs(); ++legNum) {
+        const Scalar force = std::max(S(0.0), foot_forces[legNum].z());
+        moment += force * trajectoryGen.legToBody(legNum, measured_leg_positions[legNum]).head<2>();
+        total += force;
+    }
+    cop = moment / total;
+    return true;
 }
 
 /**
@@ -206,7 +252,7 @@ void GaitEngine::limitAcceleration(Scalar dt) {
     const Scalar dLeft = wanted.left - applied_intent.left;
     const Scalar dYaw = wanted.yaw - applied_intent.yaw;
     // The change at the centre of mass: turning faster carries it round the body origin
-    const Vec2 c = com.head<2>() + sway;
+    const Vec2 c = com.head<2>() + sway + correction;
     const Vec2 acceleration(dForward - dYaw * c.y(), dLeft + dYaw * c.x());
     std::array<Vec2, kMaxLegs> feet;
     const int count = plantedFeet(feet, false);
@@ -273,16 +319,184 @@ void GaitEngine::updateBalance(Scalar dt, Scalar moveScale) {
         }
     }
     footHeight = heights > 0 ? footHeight / static_cast<Scalar>(heights) : config().currentHeight;
-    const Vec3 centre(com.x() + sway.x(), com.y() + sway.y(), com.z());
-    const Vec2 bodyVelocity = moveScale * Vec2(applied_intent.forward - applied_intent.yaw * centre.y(),
-                                               applied_intent.left + applied_intent.yaw * centre.x());
-    balance_controller.update(dt, centre, bodyVelocity, feet.data(), count, footHeight, p.com_acceleration_filter);
+    const Vec2 offset = sway + correction;
+    const Vec3 centre(com.x() + offset.x(), com.y() + offset.y(), com.z());
+    const Vec2 offsetRate = has_previous_com && dt > 0 ? Vec2((offset - previous_offset) / dt) : Vec2::Zero();
+    const Vec2 drift = has_previous_com && dt > 0 ? Vec2((com - previous_com).head<2>() / dt) : Vec2::Zero();
+    previous_com = com;
+    previous_offset = offset;
+    has_previous_com = true;
+    // What the gait commanded the body to do over the ground: how the feet that stayed down moved
+    // under the joints it sent, fitted as a rigid motion exactly as leg odometry does with the joints
+    // reported, so the two only differ by what really happened. That counts whatever the velocity
+    // alone doesn't: feet held at the edge of their stride, joint speed limits, a leg that can't reach
+    // its target, and the sway and correction moving the body over the feet.
+    Vec2 overGround = moveScale * Vec2(applied_intent.forward - applied_intent.yaw * centre.y(),
+                                       applied_intent.left + applied_intent.yaw * centre.x()) + offsetRate;
+    std::array<Vec2, kMaxLegs> before, after;
+    int stayed = 0;
+    for (int legNum = 0; legNum < numLegs(); ++legNum) {
+        const bool down = !(leg_swinging[legNum] && phase_progress > 0);
+        const Vec3 bodyFoot = trajectoryGen.legToBody(legNum, kinematics(legNum).fk(output.joints[legNum]));
+        const Vec2 foot = trajectoryGen.unposedBodyPoint(bodyFoot, walk_level).head<2>();
+        if (down && previous_command_planted[legNum] && has_previous_command_feet) {
+            before[stayed] = previous_command_feet[legNum];
+            after[stayed] = foot;
+            ++stayed;
+        }
+        previous_command_feet[legNum] = foot;
+        previous_command_planted[legNum] = down;
+    }
+    has_previous_command_feet = true;
+    BodyMotion motion;
+    if (dt > 0 && LegOdometry::estimateMotion(before.data(), after.data(), static_cast<size_t>(stayed), motion)) {
+        const Scalar yawRate = motion.dyaw / dt;
+        overGround = Vec2(motion.dx / dt - yawRate * centre.y(), motion.dy / dt + yawRate * centre.x());
+    }
+    // The controller adds the centre of mass moving relative to the body origin (c includes the sway
+    // and correction), so it's given the body's own motion without them
+    balance_controller.update(dt, centre, overGround - offsetRate, feet.data(), count, footHeight, p.com_acceleration_filter);
+    updateFeedback(dt, overGround, drift, feet, count);
+}
+
+/**
+ * @brief Balance feedback, one walking tick: measure, correct the capture point, decide on a step
+ * @param[in] dt The time since the last tick (s)
+ * @param[in] commandedOverGround The body's commanded velocity over the ground at the centre of mass
+ *            this tick, sway and correction included (m/s): what leg odometry would measure if the
+ *            robot did exactly as told
+ * @param[in] drift How fast the centre of mass moved within the body this tick (the legs, m/s)
+ * @param[in] feet The support polygon this tick
+ * @param[in] count How many feet
+ * @note The measured c dot is the body's velocity over the ground (leg odometry, which sees the
+ *       sway and the correction moving the body over its feet, blended with the IMU) plus the centre
+ *       of mass moving within the body (the legs). The commanded c dot counts the same sway and
+ *       correction, so the error is only what the feet didn't command: a push, a slip, tipping.
+ *
+ *       The correction velocity heads for -capture_gain x omega x error, plus a slow return to
+ *       centre, changing no faster than the feet can push for (accelerationScale). The correction
+ *       integrates it, up to correction_max. A step is needed when the predicted capture point is
+ *       short of min_stability_margin inside the feet, or the correction can't go any further.
+*/
+void GaitEngine::updateFeedback(Scalar dt, const Vec2& commandedOverGround, const Vec2& drift,
+                                const std::array<Vec2, kMaxLegs>& feet, int count) {
+    constexpr Scalar RETURN_TIME = S(1.0);   // s, how fast an unneeded correction eases back
+    if (!p.balance_feedback || !(dt > 0)) {
+        velocity_estimator.reset();
+        correction_velocity = Vec2::Zero();
+        correction_saturated = false;
+        step_needed = false;
+        return;
+    }
+
+    // The body over the ground at the centre of mass. Leg odometry measures joint states, so it's
+    // a command or more behind: what it adds is how far the body's motion then differed from what was
+    // commanded then (a push, a slip), carried onto this tick's command. With no walking command
+    // from then (just back from tilt mode or sitting, whose motion was commanded too), it waits.
+    const Vec2 c = com.head<2>() + sway + correction;
+    const Vec2& commandedNow = commandedOverGround;
+    command_history[command_next] = CommandRecord{now_, commandedNow};
+    command_next = (command_next + 1) % static_cast<int>(command_history.size());
+    command_count = std::min(command_count + 1, static_cast<int>(command_history.size()));
+    Vec2 reference = commandedNow;
+    if (has_odom_velocity && toSeconds(now_ - odom_velocity_stamp) < 0.1) {
+        const CommandRecord* then = nullptr;   // the latest command at or before the joint state
+        for (int i = 0; i < command_count; ++i) {
+            const CommandRecord& record = command_history[i];
+            if (record.time <= odom_velocity_stamp && (then == nullptr || record.time > then->time)) {
+                then = &record;
+            }
+        }
+        if (then != nullptr) {
+            const Vec2 measured = odom_velocity + odom_yaw_rate * Vec2(-c.y(), c.x());
+            reference = commandedNow + (measured - then->velocity);
+        }
+    }
+    BodyVelocityInputs in;
+    in.dt = dt;
+    in.reference = reference;
+    // An accelerometer always reads about 1 g standing still: a reading without it (all zeros, from a
+    // robot that doesn't pass it on) is no reading
+    in.imuFresh = imuFresh() && body_linear_acceleration.norm() > BodyVelocityEstimator::GRAVITY / 2;
+    in.roll = body_roll;
+    in.pitch = body_pitch;
+    in.angularVelocity = body_angular_velocity;
+    in.linearAcceleration = body_linear_acceleration;
+    in.comHeight = balance_controller.state().height;
+    velocity_estimator.update(in, p.velocity_filter);
+
+    Vec2 cop;
+    const bool hasCop = centreOfPressure(cop);
+    balance_controller.measure(velocity_estimator.velocity() + drift, hasCop ? &cop : nullptr, feet.data(), count,
+                               p.balance_delay);
+
+    // What counts as a push: an error beyond the deadband and beyond the gait's own usual wobble
+    // (a trotting body rocks, soft servos lag), which the running RMS learns over a couple of seconds
+    constexpr Scalar NOISE_TIME = S(2.0);   // s
+    const BalanceState& s = balance_controller.state();
+    const Scalar threshold = p.capture_deadband + 3 * std::sqrt(capture_noise);
+    capture_noise += (dt / (NOISE_TIME + dt)) * (s.captureError.squaredNorm() - capture_noise);
+
+    // Shift the body to put the capture point back. Only for a gait whose feet always make a polygon:
+    // a trot's pair can't push from anywhere but their line, so a shift does nothing for it (the
+    // moments its four feet are down don't count). Without area just now, it eases back too.
+    const bool area = gaitHasSupportArea(config().currentGait) && s.supportArea;
+    const Vec2 push = area ? balance_controller.correctionVelocity(p.capture_gain, threshold) : Vec2::Zero();
+    const Vec2 wanted = push - correction / RETURN_TIME;
+    const Vec2 change = wanted - correction_velocity;
+    const Scalar scale = balance_controller.accelerationScale(change / dt, feet.data(), count, p.min_stability_margin);
+    correction_velocity += scale * change;
+    correction += correction_velocity * dt;
+    correction_saturated = scale < 1;
+    if (correction.norm() > p.correction_max) {
+        correction *= p.correction_max / correction.norm();
+        correction_velocity = Vec2::Zero();
+        correction_saturated = true;
+    }
+
+    // Too far for the shift to catch: step where the capture point is heading. Not with feet in a
+    // line, as a trot's: that gait balances by stepping already, and placing its feet from its
+    // dynamics needs them planned (preview control).
+    step_needed = p.capture_stepping && area && s.captureError.norm() > threshold &&
+        (s.predictedCaptureMargin < p.min_stability_margin || correction_saturated);
+    if (step_needed) {
+        // The swing lands when this phase ends, or a whole (fast) phase from now if none has begun
+        const Scalar remaining = phase_progress > 0 ? (1 - phase_progress) * current_phase_duration : p.min_phase_duration;
+        Vec2 wantedStep = balance_controller.touchdownOffset(remaining);
+        if (wantedStep.norm() > config().maxStride) {
+            wantedStep *= config().maxStride / wantedStep.norm();
+        }
+        if (wantedStep.norm() > step_offset.norm()) {
+            step_offset = wantedStep;   // the furthest it has needed this step
+        }
+    }
+    const bool wasCatching = catching_step;
+    catching_step = step_needed || (catching_step && phase_progress > 0);
+    if (catching_step && !wasCatching) {
+        emit(LogLevel::Info, "Capture point %.0f mm off: stepping %.0f mm to catch the robot",
+            static_cast<double>(s.captureError.norm() * 1000), static_cast<double>(step_offset.norm() * 1000));
+    }
 }
 
 /**
  * @brief Forget the walking motion: tilt mode and sitting start and end at rest
 */
 void GaitEngine::resetBalance() {
+    // The correction eases back like the sway does, rather than jumping the feet
+    const Vec2 back = -correction;
+    const Scalar maxStep = p.sway_speed * S(0.01);
+    correction += back.norm() > maxStep ? Vec2(back * (maxStep / back.norm())) : back;
+    correction_velocity = Vec2::Zero();
+    correction_saturated = false;
+    capture_noise = 0;
+    catching_step = false;
+    step_needed = false;
+    step_offset = Vec2::Zero();
+    velocity_estimator.reset();
+    has_previous_com = false;
+    command_count = 0;
+    command_next = 0;
+    has_previous_command_feet = false;
     balance_controller.reset();
     applied_intent = MotionIntent{};
     requested_intent = MotionIntent{};

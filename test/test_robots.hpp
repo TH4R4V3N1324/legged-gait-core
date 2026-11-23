@@ -4,6 +4,8 @@
 // Robots that differ from explorer in one way each, to prove the engine isn't a hexapod engine:
 // the leg count (a quadruped), and the joints per leg (four, and two). Only the tests use them.
 
+#include <algorithm>
+#include <array>
 #include <cmath>
 #include <limits>
 #include <string>
@@ -122,11 +124,28 @@ public:
         for (int i = 0; i < ticks; ++i) {
             if (servoPower) {
                 feedback.stamp = now;
+                feedback.hasEffort = sensors || efforts;
+                if (sensors || efforts) {
+                    setEfforts();
+                }
                 engine.onJointStates(feedback);
+            }
+            if (sensors || imu) {
+                gait_core::ImuSample sample;
+                sample.stamp = now;
+                sample.linearAcceleration = Vec3(0, 0, static_cast<Scalar>(9.81));
+                engine.setImu(sample);
             }
             now += 10'000'000;
             const gait_core::GaitOutput out = engine.update(static_cast<Scalar>(0.01), now);
             servoPower = out.servoPower;
+            if (engine.catchingStep()) {
+                if (catchingTicks == 0) {
+                    firstCatch = stage + " at t=" + std::to_string(now / 1e9) + " s";
+                }
+                ++catchingTicks;
+            }
+            heldTicks += engine.liftHeld() ? 1 : 0;
             if (out.commanded) {
                 for (int leg = 0; leg < definition.numLegs; ++leg) {
                     check(leg, out.joints[leg]);
@@ -164,12 +183,41 @@ public:
     gait_core::JointFeedback feedback;
     gait_core::Timestamp now = 1'000'000'000;
     bool servoPower;
+    bool sensors = false;                // feed a level IMU, and joint efforts with the lowest feet carrying the weight
+    bool imu = false;                    // just the IMU
+    bool efforts = false;                // just the joint efforts
+    int catchingTicks = 0;               // ticks spent stepping to catch the robot (balance_feedback)
+    std::string firstCatch;              // where the first of them was
+    int heldTicks = 0;                   // ticks a lift was held (dynamic_stability)
     std::string problem;                 // the first bad command, empty if none
     std::string stage = "start";      // what the robot is doing, for messages
     std::vector<std::string> warnings;
     std::vector<std::string> errors;
 
 private:
+    /**
+     * @brief 25 N shared by the lowest feet (within 5 mm), as the joint torques that hold it
+     * @note A leg too short of joints to resolve a force (two) still reports torques; the engine
+     *       finds no force from them, as it would on the real robot
+    */
+    void setEfforts() {
+        Scalar lowest = 1;
+        std::array<Scalar, gait_core::kMaxLegs> z{};
+        for (int leg = 0; leg < definition.numLegs; ++leg) {
+            z[leg] = foot(leg).z();
+            lowest = std::min(lowest, z[leg]);
+        }
+        int loaded = 0;
+        for (int leg = 0; leg < definition.numLegs; ++leg) {
+            loaded += z[leg] <= lowest + static_cast<Scalar>(0.005) ? 1 : 0;
+        }
+        for (int leg = 0; leg < definition.numLegs; ++leg) {
+            const Scalar fz = z[leg] <= lowest + static_cast<Scalar>(0.005) ? 25 / static_cast<Scalar>(loaded) : 0;
+            const gait_core::ChainKinematics chain(definition.legs[leg]);
+            feedback.effort[leg] = -chain.jacobian(feedback.angles[leg]).transpose() * Vec3(0, 0, fz);
+        }
+    }
+
     void check(int leg, const gait_core::JointVec& q) {
         if (!problem.empty()) {
             return;

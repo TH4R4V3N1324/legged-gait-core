@@ -208,6 +208,13 @@ bool GaitEngine::updateLegOdometry(Timestamp stamp) {
             // Pushing against something, the feet scrub along the ground, so they say the body is
             // moving when it isn't: keep only the turn
             legOdometry.integrate(is_blocked ? BodyMotion{0, 0, motion.dyaw} : motion);
+            if (dt > 0) {
+                // The body's velocity over the planted feet, for balance feedback
+                odom_velocity = is_blocked ? Vec2::Zero() : Vec2(motion.dx / dt, motion.dy / dt);
+                odom_yaw_rate = motion.dyaw / dt;
+                odom_velocity_stamp = stamp;
+                has_odom_velocity = true;
+            }
         }
         if (climb_anchored) {
             Scalar climb;

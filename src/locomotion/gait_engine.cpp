@@ -100,6 +100,19 @@ GaitEngine::GaitEngine(const GaitParams& params, const RobotDefinition& geometry
         output.joints[legNum] = JointVec::Zero(kinematics(legNum).numJoints());
     }
     for (int gait = 0; gait < config().numGaits(); ++gait) {
+        // Whether the feet left down in each of its phases make a polygon, at the neutral stance
+        const GaitSchedule schedule = config().getGaitConfig(static_cast<uint8_t>(gait));
+        gait_area[gait] = !schedule.empty();
+        for (size_t phase = 0; phase < schedule.size(); ++phase) {
+            std::array<Vec2, kMaxLegs> down;
+            int count = 0;
+            for (int legNum = 0; legNum < numLegs(); ++legNum) {
+                if (!schedule.swingsIn(legNum, phase)) {
+                    down[count++] = trajectoryGen.legToBody(legNum, config().startPosition[legNum]).head<2>();
+                }
+            }
+            gait_area[gait] = gait_area[gait] && BalanceController::hasArea(down.data(), count);
+        }
         // Sway only a gait that needs it and that it rescues; the rest keep the body where walking puts it
         gait_margin[gait] = computeGaitMargin(static_cast<uint8_t>(gait), false);
         if (p.body_sway && gait_margin[gait] < p.min_stability_margin) {
@@ -295,12 +308,13 @@ Scalar GaitEngine::computeGaitMargin(uint8_t gait, bool sway) const {
 }
 
 /**
- * @brief The pose the feet are commanded through while walking: leveling plus the body's sway
+ * @brief The pose the feet are commanded through while walking: leveling, the body's sway, and
+ *        balance feedback's correction
 */
 BodyPose GaitEngine::walkPose() const {
     BodyPose pose = walk_level;
-    pose.translation.x() += sway.x();
-    pose.translation.y() += sway.y();
+    pose.translation.x() += sway.x() + correction.x();
+    pose.translation.y() += sway.y() + correction.y();
     return pose;
 }
 

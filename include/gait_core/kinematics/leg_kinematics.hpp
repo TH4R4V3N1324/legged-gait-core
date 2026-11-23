@@ -56,6 +56,11 @@ public:
         if (torques.size() != J.cols()) {
             return false;
         }
+        // Fewer than three joints can't resolve a 3D force. J J^T is then singular, but rounding can
+        // leave its determinant above the threshold below in float, and a force from that is nonsense
+        if (J.cols() < 3) {
+            return false;
+        }
         const Mat3 JJt = J * J.transpose();
         if (std::abs(JJt.determinant()) < Scalar(1e-12)) {
             return false;

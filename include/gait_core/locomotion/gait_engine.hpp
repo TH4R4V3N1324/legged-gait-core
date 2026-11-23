@@ -9,6 +9,7 @@
 #include "gait_core/locomotion/balance_controller.hpp"
 #include "gait_core/locomotion/gait_config.hpp"
 #include "gait_core/kinematics/yaw_pitch_pitch_leg.hpp"
+#include "gait_core/estimation/body_velocity.hpp"
 #include "gait_core/estimation/leg_odometry.hpp"
 #include "gait_core/robot/robot_definition.hpp"
 #include "gait_core/locomotion/trajectory_generator.hpp"
@@ -107,6 +108,22 @@ struct GaitParams {
     // slowing until they are. Off, the same quantities are still worked out for balanceState().
     bool dynamic_stability = false;
     Scalar com_acceleration_filter = Scalar(0.05);  // s, low-pass time constant of the centre of mass acceleration
+
+    // Balance feedback (live): react to the motion the robot really has, not just what it was told.
+    // The centre of mass velocity is measured (leg odometry blended with the IMU), the support
+    // polygon is the feet the force estimates say are pushing, and the capture point is predicted
+    // over the loop delay. Its error from the commanded one is corrected by shifting the body over
+    // the feet (no harder than they can push for), and when that can't catch it, by landing the
+    // swinging feet where it will be at touchdown, stepping from standing if need be.
+    bool balance_feedback = false;
+    Scalar velocity_filter = Scalar(0.2);       // s, how long the IMU's acceleration is trusted before leg odometry takes over
+    Scalar balance_delay = Scalar(0.03);        // s, from measuring to the feet acting on it
+    Scalar capture_gain = Scalar(0.5);          // share of the capture point error the body shift corrects, 0..1
+    Scalar capture_deadband = Scalar(0.01);     // m, capture point error always left alone; feedback also
+                                                // ignores what's within 3x the error's own RMS (its
+                                                // gait's usual wobble, over ~2 s), so only a push acts
+    Scalar correction_max = Scalar(0.03);       // m, furthest the body shifts over its feet to correct
+    bool capture_stepping = true;               // step where the capture point is heading when the shift can't catch it
 };
 
 enum class SitState : uint8_t {
@@ -287,6 +304,11 @@ public:
     const BalanceState& balanceState() const { return balance_controller.state(); }
     // Whether a leg is waiting to lift until the body's momentum fits the feet that stay down
     bool liftHeld() const { return lift_held; }
+    // m, body frame: how far balance feedback has shifted the body over its feet (see balance_feedback)
+    const Vec2& balanceCorrection() const { return correction; }
+    // Whether the gait is stepping where the capture point is heading, and by how far (m, body frame)
+    bool catchingStep() const { return catching_step; }
+    const Vec2& stepOffset() const { return step_offset; }
 
     // ---- Hooks ------------------------------------------------------------------------------
     std::function<void(LogLevel, const char*)> log;           // optional
@@ -301,6 +323,9 @@ public:
     Scalar gaitStabilityMargin(uint8_t gait) const;
     // Whether a gait sways the body to stay stable (see GaitParams::body_sway)
     bool gaitSways(uint8_t gait) const { return gait < config().numGaits() && gait_sways[gait]; }
+    // Whether the feet a gait keeps down always enclose an area, in every phase: false for a trot,
+    // whose diagonal pair is a line. Balance feedback only shifts the body and steps for gaits that do.
+    bool gaitHasSupportArea(uint8_t gait) const { return gait < config().numGaits() && gait_area[gait]; }
     // m, the body's current sway (x, y), relative to where walking alone would put it
     const Vec2& bodySway() const { return sway; }
     // The first of the robot's gaits whose margin is below min_stability_margin, or -1 if none is
@@ -454,6 +479,9 @@ private:
     MotionIntent applied_intent{};         // the velocity actually walked, acceleration limited
     MotionIntent requested_intent{};       // the command it heads for, before limiting: idle only when both are
     bool lift_held = false;                // the phase's legs are waiting to lift
+    std::array<Vec2, kMaxLegs> previous_command_feet{};    // last tick's commanded feet (body frame x, y)
+    std::array<bool, kMaxLegs> previous_command_planted{}; // and which were down
+    bool has_previous_command_feet = false;
     Scalar lift_speed_scale = 1;           // while held, the share of the command the capture point fits
     Scalar lift_hold_time = 0;             // s they have waited
     Vec3 liveCentreOfMass() const;
@@ -461,6 +489,36 @@ private:
     bool holdLift(Scalar dt);
     void updateBalance(Scalar dt, Scalar moveScale);
     void resetBalance();
+
+    // Balance feedback
+    Vec2 odom_velocity = Vec2::Zero();       // m/s, body frame: the body over the planted feet, from leg odometry
+    Scalar odom_yaw_rate = 0;                // rad/s
+    Timestamp odom_velocity_stamp = 0;       // when it was measured
+    bool has_odom_velocity = false;
+    BodyVelocityEstimator velocity_estimator;
+    // What recent walking ticks commanded the body to do over its feet, so leg odometry (which
+    // measures joint states, so a command or more behind) is compared with the command it measured
+    struct CommandRecord {
+        Timestamp time = 0;
+        Vec2 velocity = Vec2::Zero();   // m/s, at the centre of mass, sway and correction included
+    };
+    std::array<CommandRecord, 16> command_history{};
+    int command_count = 0;
+    int command_next = 0;
+    Vec3 previous_com = Vec3::Zero();        // last tick's centre of mass in the body (legs only moving it)
+    Vec2 previous_offset = Vec2::Zero();     // last tick's sway plus correction
+    bool has_previous_com = false;
+    Vec2 correction = Vec2::Zero();          // m, the body's shift over its feet to correct the capture point
+    Vec2 correction_velocity = Vec2::Zero(); // m/s, how fast that shift is moving
+    bool correction_saturated = false;       // the shift is at correction_max or limited by the feet
+    Scalar capture_noise = 0;                // m^2, the capture point error's running mean square (~2 s)
+    bool catching_step = false;              // stepping to where the capture point is heading
+    bool step_needed = false;                // the capture point needs a step this tick
+    Vec2 step_offset = Vec2::Zero();         // m, body frame: how far the swinging feet land from the gait's targets
+    void updateFeedback(Scalar dt, const Vec2& commandedOverGround, const Vec2& drift,
+                        const std::array<Vec2, kMaxLegs>& feet, int count);
+    bool centreOfPressure(Vec2& cop) const;
+    bool contactPolygon() const;
     int plantedFeet(std::array<Vec2, kMaxLegs>& feet, bool staying) const;
 
     // Leg odometry
@@ -482,6 +540,7 @@ private:
 
     std::array<Scalar, kMaxGaits> gait_margin{};   // gaitStabilityMargin, worked out once
     std::array<bool, kMaxGaits> gait_sways{};      // gaitSways
+    std::array<bool, kMaxGaits> gait_area{};       // gaitHasSupportArea
     Scalar computeGaitMargin(uint8_t gait, bool sway) const;
     Scalar plantedMargin(const std::array<Vec3, kMaxLegs>& feet, const Vec2& bodySway) const;
 

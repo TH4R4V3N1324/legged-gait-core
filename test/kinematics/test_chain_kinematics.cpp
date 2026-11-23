@@ -232,6 +232,21 @@ TEST(ChainKinematics, TwoJointLeg) {
     EXPECT_LT((chain.fk(solved) - target).norm(), ChainKinematics::IK_TOLERANCE);
 }
 
+TEST(ChainKinematics, TwoJointsNeverGiveAFootForce) {
+    // Two joints can't resolve a 3D force: whatever the torques and pose, there's no answer, even
+    // where rounding leaves J J^T's determinant just off zero
+    const ChainKinematics chain(twoJointLeg());
+    for (double hip = -1.0; hip <= 1.0; hip += 0.25) {
+        for (double knee = 0.3; knee <= 2.0; knee += 0.25) {
+            const JointVec q = angles({hip, knee});
+            const JointVec torques = -chain.jacobian(q).transpose() * Vector3d(0, 0, 5);
+            Vector3d force = Vector3d::Constant(42);
+            EXPECT_FALSE(chain.groundForce(q, torques, force)) << "hip " << hip << " knee " << knee;
+            EXPECT_EQ(force, Vector3d::Constant(42)) << "left untouched";
+        }
+    }
+}
+
 TEST(ChainKinematics, FourJointLeg) {
     const ChainKinematics chain(fourJointLeg());
     ASSERT_EQ(chain.numJoints(), 4);

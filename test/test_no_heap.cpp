@@ -230,9 +230,10 @@ namespace {
  * @return The allocations made after it stood up
 */
 long allocationsRunning(const gait_core::RobotDefinition& robot, double speed, bool sits,
-                        bool dynamicStability = false) {
+                        bool dynamicStability = false, bool balanceFeedback = false) {
     gait_core::GaitParams params;
     params.dynamic_stability = dynamicStability;
+    params.balance_feedback = balanceFeedback;
     GaitEngine engine{params, robot};
     engine.log = [](LogLevel, const char*) { ++logged; };
     JointFeedback feedback;
@@ -288,6 +289,11 @@ TEST(NoHeap, AQuadrupedSwayingNeverAllocates) {
 TEST(NoHeap, DynamicStabilityNeverAllocates) {
     EXPECT_EQ(allocationsRunning(test_robots::quadruped(), 0.1, true, true), 0);
     EXPECT_EQ(allocationsRunning(explorerRobot(), 0.15, true, true), 0);
+}
+
+TEST(NoHeap, BalanceFeedbackNeverAllocates) {
+    EXPECT_EQ(allocationsRunning(test_robots::quadruped(), 0.1, true, true, true), 0);
+    EXPECT_EQ(allocationsRunning(explorerRobot(), 0.15, true, true, true), 0);
 }
 
 TEST(NoHeap, FourJointLegsNeverAllocate) {

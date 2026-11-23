@@ -137,6 +137,7 @@ namespace {
 GaitParams dynamicStability() {
     GaitParams params;
     params.dynamic_stability = true;
+    params.balance_feedback = true;   // and Phase B's on top
     return params;
 }
 
@@ -168,6 +169,57 @@ TEST(TwoJointLegs, LiveALifeWithDynamicStability) {
             warning.find("Tilt pose limited") != std::string::npos || warning.find("Refused to sit") != std::string::npos;
         EXPECT_TRUE(expected) << warning;
     }
+}
+
+// ---- And with sensors: an IMU and foot forces, so balance feedback measures rather than assumes ----
+// Nothing pushes these robots, so feedback must never take a step to catch one. The simulated IMU
+// always reads level, even while tilt mode leans the body, so tilt leveling winds up against the
+// legs' reach and says so (with every feature off too): that one warning is the simulation's.
+
+namespace {
+
+void expectOnlySimulatedImuWarnings(const SimRobot& robot) {
+    for (const std::string& warning : robot.warnings) {
+        EXPECT_NE(warning.find("Tilt pose limited"), std::string::npos) << warning;
+    }
+}
+
+}  // namespace
+
+TEST(Explorer, LivesALifeWithSensorsAndFeedback) {
+    SimRobot robot{explorerRobot(), dynamicStability()};
+    robot.sensors = true;
+    liveALife(robot, 0.08);
+    expectOnlySimulatedImuWarnings(robot);
+    EXPECT_EQ(robot.catchingTicks, 0);
+}
+
+TEST(Quadruped, LivesALifeWithSensorsAndFeedback) {
+    SimRobot robot{test_robots::quadruped(), dynamicStability()};
+    robot.sensors = true;
+    liveALife(robot, 0.03);
+    expectOnlySimulatedImuWarnings(robot);
+    EXPECT_EQ(robot.catchingTicks, 0);
+}
+
+TEST(FourJointLegs, LiveALifeWithSensorsAndFeedback) {
+    SimRobot robot{test_robots::fourJointHexapod(), dynamicStability()};
+    robot.sensors = true;
+    liveALife(robot, 0.08);
+    expectOnlySimulatedImuWarnings(robot);
+    EXPECT_EQ(robot.catchingTicks, 0);
+}
+
+TEST(TwoJointLegs, LiveALifeWithSensorsAndFeedback) {
+    SimRobot robot{test_robots::twoJointHexapod(), dynamicStability()};
+    robot.sensors = true;
+    liveALife(robot, 0.05, false);
+    for (const std::string& warning : robot.warnings) {
+        const bool expected = warning.find("straight to the standing pose") != std::string::npos ||
+            warning.find("Tilt pose limited") != std::string::npos || warning.find("Refused to sit") != std::string::npos;
+        EXPECT_TRUE(expected) << warning;
+    }
+    EXPECT_EQ(robot.catchingTicks, 0);
 }
 
 TEST(FourJointLegs, StandBackInTheSamePoseWhereverTheyWalked) {

@@ -188,3 +188,124 @@ TEST(BalanceController, ResetStartsAfresh) {
     EXPECT_NEAR(balance.state().comVelocity.x(), 0.1, TOL);
     EXPECT_EQ(balance.state().comAcceleration, Vec2::Zero());
 }
+
+// ---- Measured (Phase B) -----------------------------------------------------------------------
+
+TEST(BalanceController, UnmeasuredTheMeasurementIsTheCommand) {
+    BalanceController balance;
+    const Square square;
+    const Vec2 v(static_cast<Scalar>(0.1), 0);
+    for (int i = 0; i < 20; ++i) {
+        step(balance, square, Vec2::Zero(), v);
+    }
+    const BalanceState& s = balance.state();
+    EXPECT_EQ(s.measuredVelocity, s.comVelocity);
+    EXPECT_EQ(s.predictedCapturePoint, s.capturePoint);
+    EXPECT_EQ(s.captureError, Vec2::Zero());
+    EXPECT_FALSE(s.hasCentreOfPressure);
+}
+
+TEST(BalanceController, MeasuringWhatWasCommandedIsNoError) {
+    BalanceController balance;
+    const Square square;
+    const Vec2 v(static_cast<Scalar>(0.1), 0);
+    for (int i = 0; i < 20; ++i) {
+        step(balance, square, Vec2::Zero(), v);
+    }
+    balance.measure(balance.state().comVelocity, nullptr, square.feet.data(), 4, static_cast<Scalar>(0.03));
+    EXPECT_NEAR(balance.state().captureError.norm(), 0, 1e-6);
+    EXPECT_EQ(balance.correctionVelocity(1, 0), Vec2::Zero());
+}
+
+TEST(BalanceController, AnErrorGrowsOverTheDelay) {
+    // Measured 0.1 m/s faster than commanded: xi is 0.1 / omega further on, and by the time the feet
+    // can act, e^(omega d) times that
+    BalanceController balance;
+    const Square square;
+    for (int i = 0; i < 20; ++i) {
+        step(balance, square, Vec2::Zero(), Vec2::Zero());
+    }
+    const Scalar delay = static_cast<Scalar>(0.03);
+    balance.measure(Vec2(static_cast<Scalar>(0.1), 0), nullptr, square.feet.data(), 4, delay);
+    const BalanceState& s = balance.state();
+    const Scalar growth = std::exp(omega() * delay);
+    EXPECT_NEAR(s.measuredCapturePoint.x(), 0.1 / omega(), TOL);
+    EXPECT_NEAR(s.captureError.x(), 0.1 / omega() * growth, TOL);
+    EXPECT_NEAR(s.predictedCapturePoint.x(), 0.1 / omega() * growth, TOL);   // the ZMP is at c here
+    EXPECT_NEAR(s.predictedCaptureMargin, 0.1 - s.predictedCapturePoint.x(), TOL);
+}
+
+TEST(BalanceController, TheCapturePointRunsAwayFromTheCentreOfPressure) {
+    BalanceController balance;
+    const Square square;
+    for (int i = 0; i < 20; ++i) {
+        step(balance, square, Vec2::Zero(), Vec2::Zero());
+    }
+    // Standing still, but the feet are pushing from 2 cm behind: xi drifts forward, away from it
+    const Vec2 cop(static_cast<Scalar>(-0.02), 0);
+    const Scalar delay = static_cast<Scalar>(0.05);
+    balance.measure(Vec2::Zero(), &cop, square.feet.data(), 4, delay);
+    const BalanceState& s = balance.state();
+    EXPECT_TRUE(s.hasCentreOfPressure);
+    EXPECT_NEAR(s.copMargin, 0.08, TOL);
+    EXPECT_NEAR(s.predictedCapturePoint.x(), -0.02 + 0.02 * std::exp(omega() * delay), TOL);
+    EXPECT_NEAR(s.captureError.norm(), 0, TOL);   // the same for the command: nothing to correct
+}
+
+TEST(BalanceController, TheCorrectionCancelsTheError) {
+    BalanceController balance;
+    const Square square;
+    for (int i = 0; i < 20; ++i) {
+        step(balance, square, Vec2::Zero(), Vec2::Zero());
+    }
+    balance.measure(Vec2(0, static_cast<Scalar>(-0.2)), nullptr, square.feet.data(), 4, 0);
+    // Gain 1: change c dot by -omega x error, which is exactly the velocity measured too much
+    EXPECT_NEAR((balance.correctionVelocity(1, 0) - Vec2(0, static_cast<Scalar>(0.2))).norm(), 0, TOL);
+    EXPECT_NEAR((balance.correctionVelocity(static_cast<Scalar>(0.5), 0) - Vec2(0, static_cast<Scalar>(0.1))).norm(), 0, TOL);
+    // The deadband takes its size off the error
+    const Scalar error = static_cast<Scalar>(0.2) / omega();
+    const Scalar deadband = error / 2;
+    EXPECT_NEAR(balance.correctionVelocity(1, deadband).y(), 0.1, TOL);
+    EXPECT_EQ(balance.correctionVelocity(1, error * 2), Vec2::Zero());
+}
+
+TEST(BalanceController, TheTouchdownOffsetIsTheErrorCarriedOn) {
+    BalanceController balance;
+    const Square square;
+    for (int i = 0; i < 20; ++i) {
+        step(balance, square, Vec2::Zero(), Vec2::Zero());
+    }
+    balance.measure(Vec2(static_cast<Scalar>(0.05), 0), nullptr, square.feet.data(), 4, 0);
+    const Scalar t = static_cast<Scalar>(0.3);
+    EXPECT_NEAR(balance.touchdownOffset(t).x(), 0.05 / omega() * std::exp(omega() * t), TOL);
+    EXPECT_NEAR(balance.touchdownOffset(0).x(), 0.05 / omega(), TOL);
+}
+
+TEST(BalanceController, EachUpdateStartsUnmeasured) {
+    BalanceController balance;
+    const Square square;
+    step(balance, square, Vec2::Zero(), Vec2::Zero());
+    balance.measure(Vec2(1, 0), nullptr, square.feet.data(), 4, static_cast<Scalar>(0.03));
+    step(balance, square, Vec2::Zero(), Vec2::Zero());
+    EXPECT_EQ(balance.state().captureError, Vec2::Zero());
+    EXPECT_EQ(balance.state().delay, 0);
+}
+
+TEST(BalanceController, FeetInALineHoldNothingBack) {
+    // A trot's diagonal pair: no inside to keep the capture point or the ZMP in, so neither the lift
+    // gate nor the acceleration limit has anything to judge, rather than stopping the robot dead
+    BalanceController balance;
+    const Square square;
+    for (int i = 0; i < 20; ++i) {
+        step(balance, square, Vec2(static_cast<Scalar>(0.02), 0), Vec2(static_cast<Scalar>(0.3), 0));
+    }
+    const std::array<Vec2, 2> pair = {square.feet[0], square.feet[2]};
+    EXPECT_FALSE(BalanceController::hasArea(pair.data(), 2));
+    EXPECT_TRUE(balance.canLift(pair.data(), 2, static_cast<Scalar>(0.01)));
+    EXPECT_EQ(balance.accelerationScale(Vec2(50, 0), pair.data(), 2, static_cast<Scalar>(0.01)), 1);
+    EXPECT_EQ(balance.velocityScale(pair.data(), 2, static_cast<Scalar>(0.01)), 1);
+    // Three in a line are no better; three in a triangle are
+    const std::array<Vec2, 3> line = {Vec2(-0.1f, 0), Vec2(0, 0), Vec2(0.1f, 0)};
+    EXPECT_FALSE(BalanceController::hasArea(line.data(), 3));
+    EXPECT_TRUE(BalanceController::hasArea(square.feet.data(), 3));
+}

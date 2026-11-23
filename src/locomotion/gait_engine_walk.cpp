@@ -152,7 +152,8 @@ bool GaitEngine::handleIdleReturn(Scalar dt) {
     auto still = [DEADZONE](const MotionIntent& intent) {
         return std::abs(intent.forward) < DEADZONE && std::abs(intent.left) < DEADZONE && std::abs(intent.yaw) < DEADZONE;
     };
-    const bool idle = still(current_motion_intent) && still(requested_intent);
+    // A step to catch the robot counts as moving too, so the feet step back to their stance after
+    const bool idle = still(current_motion_intent) && still(requested_intent) && !catching_step;
 
     // Track if we've ever moved (received a non-zero command and started stepping)
     if (!idle && phase_progress > 0) {
@@ -228,7 +229,12 @@ std::array<Vec3, kMaxLegs> GaitEngine::walkTargets(Scalar forward, Scalar left, 
 */
 void GaitEngine::walk(Scalar dt) {
     const bool velocityIdle = handleIdleReturn(dt);
-    if (idleReturning) return;
+    if (idleReturning) {
+        // Stepping back to stance, without the balance update: start it afresh afterwards rather
+        // than take the whole return for one tick's motion
+        resetBalance();
+        return;
+    }
 
     trajectoryGen.EnsureGaitConfig();
 
@@ -259,6 +265,9 @@ void GaitEngine::walk(Scalar dt) {
         const Scalar strideLimitedDuration = 2 * config().maxStride / ((groups - 1) * footSpeed);
         current_phase_duration = std::clamp(strideLimitedDuration, p.min_phase_duration, p.phase_duration);
     }
+    if (catching_step) {
+        current_phase_duration = std::min(current_phase_duration, p.min_phase_duration);   // catch it quickly
+    }
     const Scalar stanceTime = (groups - 1) * current_phase_duration;
 
     // Start of a phase: the next group lifts off from where it stands
@@ -288,8 +297,12 @@ void GaitEngine::walk(Scalar dt) {
         footholdPlanner != nullptr && footholdPlanner->ready();
     for (int legNum = 0; legNum < numLegs(); ++legNum) {
         if (!leg_swinging[legNum]) continue;
-        Vec3 desired = trajectoryGen.swingTarget(legNum,
-            trajectoryGen.footDisplacement(forward, left, yaw, legNum, stanceTime / 2));
+        Vec3 displacement = trajectoryGen.footDisplacement(forward, left, yaw, legNum, stanceTime / 2);
+        if (catching_step) {
+            // Land where the capture point will be (still within the stride circle)
+            displacement += AngleAxis(-trajectoryGen.legYaw(legNum), Vec3::UnitZ()) * Vec3(step_offset.x(), step_offset.y(), 0);
+        }
+        Vec3 desired = trajectoryGen.swingTarget(legNum, displacement);
         desired.z() = plantedStart(legNum).z();  // expect the ground where this foot last stood
         if (useMap) {
             footholdPlanner->plan(legNum, desired, swing_start[legNum], swing_lift[legNum]);
@@ -353,6 +366,9 @@ void GaitEngine::walk(Scalar dt) {
         leg_swinging.fill(false);
         phase = static_cast<uint8_t>((phase + 1) % trajectoryGen.gaitState.config.size());
         phase_progress = 0;
+        if (!step_needed) {
+            step_offset = Vec2::Zero();   // that step has landed and none more is needed
+        }
     }
 }
 
