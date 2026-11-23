@@ -1599,3 +1599,87 @@ TEST(GaitEngine, FeedbackLearnsBeforeItActs) {
         ASSERT_LT(robot.engine.balanceCorrection().norm(), 0.001);
     });
 }
+
+// ---------------------------------------------------------------------------------------------
+// Foot placement
+// ---------------------------------------------------------------------------------------------
+
+namespace {
+
+/**
+ * @brief A quadruped trotting forward, its true velocity reported from outside the engine
+*/
+Robot trotting(const GaitParams& extra, uint8_t gait = 0) {
+    GaitParams params = extra;
+    params.allow_unstable_gaits = true;
+    Robot robot(params, quadruped());
+    robot.run(3.0);
+    robot.engine.sit(false);
+    robot.run(6.5);
+    robot.engine.setGait(gait);
+    robot.engine.setVelocity({static_cast<Scalar>(0.1), 0, 0});
+    robot.run(1.0);
+    return robot;
+}
+
+/**
+ * @brief Tell the engine the body moves at the commanded velocity plus an extra (as a state estimator
+ *        would see a push or a slide), for a while
+*/
+void reportVelocity(Robot& robot, const gait_core::Vec2& extra, double seconds) {
+    runChecking(robot, seconds, [&] {
+        robot.engine.setBodyVelocity(gait_core::Vec2(static_cast<Scalar>(0.1), 0) + extra, 0, robot.now);
+    });
+}
+
+}  // namespace
+
+TEST(GaitEngine, FootPlacementStepsWhereTheBodyIsHeading) {
+    // Carried 0.1 m/s to the left that it wasn't told to go: the feet land that much further left, by
+    // that velocity's capture point (0.1 / omega)
+    GaitParams params;
+    params.foot_placement = true;
+    Robot robot = trotting(params);
+    reportVelocity(robot, gait_core::Vec2(0, static_cast<Scalar>(0.1)), 4.0);   // smoothed over ~a phase (1 s here)
+    const gait_core::Vec2 offset = robot.engine.placementOffset();
+    const Scalar omega = robot.engine.balanceState().omega;
+    EXPECT_NEAR(offset.y(), 0.1 / omega, 0.004);
+    EXPECT_NEAR(offset.x(), 0, 0.004);
+}
+
+TEST(GaitEngine, FootPlacementScalesWithItsGainAndIsCappedAtAStride) {
+    GaitParams params;
+    params.foot_placement = true;
+    params.foot_placement_gain = static_cast<Scalar>(0.5);
+    Robot half = trotting(params);
+    reportVelocity(half, gait_core::Vec2(0, static_cast<Scalar>(0.1)), 4.0);
+    EXPECT_NEAR(half.engine.placementOffset().y(), 0.05 / half.engine.balanceState().omega, 0.003);
+
+    params.foot_placement_gain = 1;
+    Robot fast = trotting(params);
+    reportVelocity(fast, gait_core::Vec2(static_cast<Scalar>(5), 0), 1.0);
+    EXPECT_NEAR(fast.engine.placementOffset().norm(), quadruped().maxStride, 1e-4);
+}
+
+TEST(GaitEngine, FootPlacementLeavesGaitsThatStandOnAnAreaAndOffAlone) {
+    GaitParams on;
+    on.foot_placement = true;
+    Robot crawl = trotting(on, 1);   // a crawl keeps three feet down: it balances by them, not by stepping
+    reportVelocity(crawl, gait_core::Vec2(0, static_cast<Scalar>(0.1)), 1.0);
+    EXPECT_EQ(crawl.engine.placementOffset(), gait_core::Vec2::Zero());
+
+    Robot off = trotting(GaitParams{});
+    reportVelocity(off, gait_core::Vec2(0, static_cast<Scalar>(0.1)), 1.0);
+    EXPECT_EQ(off.engine.placementOffset(), gait_core::Vec2::Zero());
+}
+
+TEST(GaitEngine, AStaleOutsideVelocityIsIgnored) {
+    // The last report a second ago: the engine goes back to its own estimate, which here (perfect
+    // servos, nothing pushing) agrees with the command
+    GaitParams params;
+    params.foot_placement = true;
+    Robot robot = trotting(params);
+    robot.engine.setBodyVelocity(gait_core::Vec2(0, static_cast<Scalar>(0.5)), 0, robot.now);
+    robot.run(2.0);
+    EXPECT_LT(robot.engine.placementOffset().norm(), 0.003);
+}

@@ -138,6 +138,14 @@ struct GaitParams {
     // planted leg's share of carrying the robot and accelerating it as planned, tau = -J^T f, in
     // GaitOutput::torques. Needs the robot's masses (RobotDefinition::bodyMass and the links').
     bool torque_output = false;
+
+    // Foot placement (live): for a gait that balances by stepping (one whose feet down are ever just a
+    // line, like a trot, pace or bound), land each swinging foot where the body is really heading as
+    // well as where the command sends it: offset by the capture point of the velocity the body has
+    // that the command didn't ask for, (measured - commanded) / omega, times foot_placement_gain.
+    // Measures the body's velocity as balance_feedback does (leg odometry and the IMU).
+    bool foot_placement = false;
+    Scalar foot_placement_gain = Scalar(1.0);   // share of that capture point offset the feet step by
 };
 
 enum class SitState : uint8_t {
@@ -271,6 +279,21 @@ public:
     void setVelocity(const VelocityCommand& cmd) { velocity = cmd; }
     void setImu(const ImuSample& sample);
     /**
+     * @brief The body's velocity over the ground from an estimator outside the engine (visual or
+     *        inertial odometry, motion capture, a state estimator)
+     * @param[in] velocity m/s, body frame (x forward, y left), at the body origin
+     * @param[in] yawRate rad/s, anticlockwise
+     * @param[in] stamp When it was measured
+     * @note While it's fresh (under 0.1 s old) balance feedback and foot placement use it in place of
+     *       their own estimate from leg odometry and the IMU.
+    */
+    void setBodyVelocity(const Vec2& velocity, Scalar yawRate, Timestamp stamp) {
+        external_velocity = velocity;
+        external_yaw_rate = yawRate;
+        external_velocity_stamp = stamp;
+        has_external_velocity = true;
+    }
+    /**
      * @brief Measured joint state, at whatever rate it arrives
      * @return true if the leg odometry moved on (see odometry())
     */
@@ -333,6 +356,8 @@ public:
     bool liftHeld() const { return lift_held; }
     // m, body frame: how far balance feedback has shifted the body over its feet (see balance_feedback)
     const Vec2& balanceCorrection() const { return correction; }
+    // m, body frame: how far foot placement is moving the swinging feet's landing points
+    Vec2 placementOffset() const;
     // Whether the gait is stepping where the capture point is heading, and by how far (m, body frame)
     bool catchingStep() const { return catching_step; }
     const Vec2& stepOffset() const { return step_offset; }
@@ -527,6 +552,10 @@ private:
     Timestamp odom_velocity_stamp = 0;       // when it was measured
     bool has_odom_velocity = false;
     BodyVelocityEstimator velocity_estimator;
+    Vec2 external_velocity = Vec2::Zero();   // m/s, from setBodyVelocity
+    Scalar external_yaw_rate = 0;
+    Timestamp external_velocity_stamp = 0;
+    bool has_external_velocity = false;
     // What recent walking ticks commanded the body to do over its feet, so leg odometry (which
     // measures joint states, so a command or more behind) is compared with the command it measured
     struct CommandRecord {
@@ -544,6 +573,7 @@ private:
     bool correction_saturated = false;       // the shift is at correction_max or limited by the feet
     Scalar capture_noise = 0;                // m^2, the capture point error's running mean square (~2 s)
     Scalar feedback_time = 0;                // s it has been measuring since it last started (it learns before acting)
+    Vec2 placement_error = Vec2::Zero();     // m/s, the body's velocity less the command's, smoothed over ~a phase
     bool catching_step = false;              // stepping to where the capture point is heading
     bool step_needed = false;                // the capture point needs a step this tick
     Vec2 step_offset = Vec2::Zero();         // m, body frame: how far the swinging feet land from the gait's targets

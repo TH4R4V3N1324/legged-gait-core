@@ -381,11 +381,12 @@ void GaitEngine::updateBalance(Scalar dt, Scalar moveScale) {
 void GaitEngine::updateFeedback(Scalar dt, const Vec2& commandedOverGround, const Vec2& drift,
                                 const std::array<Vec2, kMaxLegs>& feet, int count) {
     constexpr Scalar RETURN_TIME = S(1.0);   // s, how fast an unneeded correction eases back
-    if (!p.balance_feedback || !(dt > 0)) {
+    if (!(p.balance_feedback || p.foot_placement) || !(dt > 0)) {
         velocity_estimator.reset();
         correction_velocity = Vec2::Zero();
         correction_saturated = false;
         step_needed = false;
+        placement_error = Vec2::Zero();
         return;
     }
 
@@ -424,11 +425,30 @@ void GaitEngine::updateFeedback(Scalar dt, const Vec2& commandedOverGround, cons
     in.linearAcceleration = body_linear_acceleration;
     in.comHeight = balance_controller.state().height;
     velocity_estimator.update(in, p.velocity_filter);
+    // An estimator outside the engine, when it has spoken lately, knows better than ours
+    Vec2 overGroundMeasured = velocity_estimator.velocity();
+    if (has_external_velocity && toSeconds(now_ - external_velocity_stamp) < 0.1) {
+        overGroundMeasured = external_velocity + external_yaw_rate * Vec2(-c.y(), c.x());
+    }
 
     Vec2 cop;
     const bool hasCop = centreOfPressure(cop);
-    balance_controller.measure(velocity_estimator.velocity() + drift, hasCop ? &cop : nullptr, feet.data(), count,
+    balance_controller.measure(overGroundMeasured + drift, hasCop ? &cop : nullptr, feet.data(), count,
                                p.balance_delay);
+
+    // For foot placement: how much faster (or slower, or sideways) the body is moving than told,
+    // smoothed over about a phase so a trot's rocking within each step doesn't move the feet about
+    {
+        const Vec2 error = balance_controller.state().measuredVelocity - balance_controller.state().comVelocity;
+        const Scalar smoothing = std::max(current_phase_duration, dt);
+        placement_error += (dt / (smoothing + dt)) * (error - placement_error);
+    }
+    if (!p.balance_feedback) {
+        correction_velocity = Vec2::Zero();
+        correction_saturated = false;
+        step_needed = false;
+        return;   // measuring for foot placement only
+    }
 
     // What counts as a push: an error beyond the deadband and beyond the gait's own usual wobble
     // (a trotting body rocks, soft servos lag), which the running RMS learns over a couple of seconds
@@ -483,6 +503,25 @@ void GaitEngine::updateFeedback(Scalar dt, const Vec2& commandedOverGround, cons
 }
 
 /**
+ * @brief How far foot placement moves the swinging feet's landing points (see foot_placement)
+ * @return m, body frame: foot_placement_gain x (measured - commanded velocity) / omega, at most a
+ *         stride; zero when off, or for a gait whose feet always enclose an area
+ * @note The capture point of the velocity the body has beyond what it was told: landing there, the
+ *       foot can bring that extra motion to rest, rather than leaving it to grow step after step.
+*/
+Vec2 GaitEngine::placementOffset() const {
+    const Scalar omega = balance_controller.state().omega;
+    if (!p.foot_placement || gaitHasSupportArea(config().currentGait) || !(omega > 0)) {
+        return Vec2::Zero();
+    }
+    Vec2 offset = p.foot_placement_gain * placement_error / omega;
+    if (offset.norm() > config().maxStride) {
+        offset *= config().maxStride / offset.norm();
+    }
+    return offset;
+}
+
+/**
  * @brief Forget the walking motion: tilt mode and sitting start and end at rest
 */
 void GaitEngine::resetBalance() {
@@ -494,6 +533,7 @@ void GaitEngine::resetBalance() {
     correction_saturated = false;
     capture_noise = 0;
     feedback_time = 0;
+    placement_error = Vec2::Zero();
     catching_step = false;
     step_needed = false;
     step_offset = Vec2::Zero();

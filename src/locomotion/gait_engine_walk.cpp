@@ -304,6 +304,9 @@ void GaitEngine::walk(Scalar dt) {
             // Land where the capture point will be (still within the stride circle)
             displacement += AngleAxis(-trajectoryGen.legYaw(legNum), Vec3::UnitZ()) * Vec3(step_offset.x(), step_offset.y(), 0);
         }
+        // A gait that balances by stepping lands where the body is really heading too
+        const Vec2 placement = placementOffset();
+        displacement += AngleAxis(-trajectoryGen.legYaw(legNum), Vec3::UnitZ()) * Vec3(placement.x(), placement.y(), 0);
         Vec3 desired = trajectoryGen.swingTarget(legNum, displacement);
         desired.z() = plantedStart(legNum).z();  // expect the ground where this foot last stood
         if (useMap) {
