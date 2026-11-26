@@ -141,22 +141,39 @@ GaitOutput GaitEngine::advance(Scalar dt, Timestamp now) {
  * @param[in] legNum The leg
  * @param[in] dt The time since the last tick (s)
  * @note The body is leveled while walking and each foot raised or lowered by load balancing.
- *       No joint moves faster than its speed limit (see jointSpeedScale): the gait slows to stay
+ *       No joint goes outside the range in the leg's definition, whatever the kinematics answer
+ *       (kinematics given with setLegKinematics needn't keep to it), and none moves faster than its speed limit (see jointSpeedScale): the gait slows to stay
  *       inside them, and this catches whatever it couldn't, the foot then lagging its target.
  *       Records where the foot was sent as the leg's current position.
 */
 void GaitEngine::commandFoot(const Vec3& target, int legNum, Scalar dt) {
     // ik doesn't promise to read the seed before writing the result, so they can't be one vector.
-    // Out of reach gives the closest pose, as before; ik's flag is unused for now.
+    // Out of reach gives the closest pose; ik's flag is unused, as where the foot really goes is
+    // checked below instead (some solvers hold the joints in range and say so, some don't).
     const LegKinematics& leg = kinematics(legNum);
     const BodyPose pose = walkPose();
     const Vec3 lift(0, 0, foot_height_offset[legNum]);
     const JointVec seed = output.joints[legNum];
     JointVec& q = output.joints[legNum];
-    leg.ik(trajectoryGen.posedFoot(legNum, target, pose) + lift, seed, q);
+    const Vec3 posed = trajectoryGen.posedFoot(legNum, target, pose) + lift;
+    leg.ik(posed, seed, q);
 
-    bool limited = false;
+    bool limited = false;        // held at a joint limit
+    bool speedLimited = false;   // held to a joint speed limit
     const LegDefinition& def = robot.legs[legNum];
+    if (q.size() == def.numJoints) {
+        bool outOfRange = false;
+        for (int j = 0; j < def.numJoints; ++j) {
+            const Scalar inRange = std::clamp(q(j), def.joints[j].lower, def.joints[j].upper);
+            outOfRange = outOfRange || inRange != q(j);
+            q(j) = inRange;
+        }
+        if (outOfRange) {
+            limited = true;
+            emitThrottled(LOG_JOINT_RANGE_LIMITED, 5, LogLevel::Warn,
+                "Leg %d asked to go past a joint limit: held at the limit, the foot misses its target", legNum + 1);
+        }
+    }
     if (dt > 0 && seed.size() == q.size()) {
         const int joints = std::min<int>(static_cast<int>(q.size()), def.numJoints);
         for (int j = 0; j < joints; ++j) {
@@ -164,17 +181,23 @@ void GaitEngine::commandFoot(const Vec3& target, int legNum, Scalar dt) {
             const Scalar step = q(j) - seed(j);
             if (std::abs(step) > maxStep) {
                 q(j) = seed(j) + std::copysign(maxStep, step);
-                limited = true;
+                speedLimited = true;
             }
         }
     }
-    if (limited) {
-        // Where the foot got to, back in the unposed frame the targets are planned in
-        const Vec3 reached = leg.fk(q) - lift;
-        current_leg_positions[legNum] = trajectoryGen.bodyToLeg(legNum,
-            trajectoryGen.unposedBodyPoint(trajectoryGen.legToBody(legNum, reached), pose));
+    if (speedLimited) {
         emitThrottled(LOG_JOINT_SPEED_LIMITED, 5, LogLevel::Debug,
             "Leg %d held to its joint speed limits: the foot lags its target", legNum + 1);
+    }
+    // Held back, or out of reach (a solver holding its joints in range misses the target without
+    // being clamped here): the foot is where the joints put it, not at its target, and the gait
+    // carries on from there
+    constexpr Scalar REACH_TOLERANCE = S(1e-3);   // m
+    const Vec3 reached = leg.fk(q);
+    if (limited || speedLimited || (reached - posed).norm() > REACH_TOLERANCE) {
+        // Back in the unposed frame the targets are planned in
+        current_leg_positions[legNum] = trajectoryGen.bodyToLeg(legNum,
+            trajectoryGen.unposedBodyPoint(trajectoryGen.legToBody(legNum, reached - lift), pose));
     } else {
         current_leg_positions[legNum] = target;
     }
@@ -205,10 +228,15 @@ void GaitEngine::sendFootTargets(const std::array<Vec3, kMaxLegs>& targets, Scal
             planted[legNum] = Vec3::Constant(std::numeric_limits<Scalar>::quiet_NaN());
         }
     }
-    const Scalar margin = plantedMargin(planted, sway);
+    // A gait only preview control plans (preview_dynamic_gaits) never has its centre of mass over its
+    // feet, just the ZMP it planned this tick: judge that instead
+    const bool zmpPlanned = preview_started && preview_last_tick == now_ &&
+        previewPlans(config().currentGait) && !gaitSways(config().currentGait);
+    const Vec2 over = zmpPlanned ? Vec2(preview_controller.zmp() - com.head<2>()) : sway;
+    const Scalar margin = plantedMargin(planted, over);
     if (margin < 0 && !sway_holding) {   // holding, the next leg is still down
-        emitThrottled(LOG_UNSTABLE_STANCE, 5, LogLevel::Warn,
-            "Centre of mass %.0f mm outside the planted feet: the robot may tip", static_cast<double>(-margin * 1000));
+        emitThrottled(LOG_UNSTABLE_STANCE, 5, LogLevel::Warn, "%s %.0f mm outside the planted feet: the robot may tip",
+            zmpPlanned ? "Planned ZMP" : "Centre of mass", static_cast<double>(-margin * 1000));
     }
 }
 

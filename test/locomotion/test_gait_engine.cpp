@@ -434,6 +434,54 @@ TEST(GaitEngine, PowerLossRebuildKeepsLegKinematicsAndJointSizes) {
     EXPECT_EQ(counting.calls, callsAfterReset);
 }
 
+namespace {
+
+/**
+ * @brief The built in leg, but answering with the coxa turned 2 rad further than asked: past its
+ *        1.4 rad limit, as kinematics that report a pose out of range without holding it in range do
+*/
+class PastLimitLeg : public gait_core::LegKinematics {
+public:
+    int numJoints() const override { return leg.numJoints(); }
+    gait_core::Vec3 fk(const JointVec& q) const override { return leg.fk(q); }
+    bool ik(const gait_core::Vec3& target, const JointVec& seed, JointVec& q) const override {
+        leg.ik(target, seed, q);
+        q(0) += 2;
+        return false;
+    }
+    gait_core::LegJacobian jacobian(const JointVec& q) const override { return leg.jacobian(q); }
+private:
+    gait_core::YawPitchPitchLeg leg{explorerRobot().legs[0]};
+};
+
+}  // namespace
+
+TEST(GaitEngine, JointsAreHeldInsideTheirLimitsWhateverTheKinematicsSay) {
+    const PastLimitLeg pastLimit;   // outlives the robot, as setLegKinematics requires
+    Robot robot = standingRobot();
+    std::vector<std::string> warnings;
+    robot.engine.log = [&](gait_core::LogLevel level, const char* message) {
+        if (level == gait_core::LogLevel::Warn) {
+            warnings.emplace_back(message);
+        }
+    };
+    const int leg = gait_core::explorer::LEG_FRONT_RIGHT;
+    robot.engine.setLegKinematics(leg, &pastLimit);
+    robot.engine.setVelocity({static_cast<Scalar>(0.05), 0, 0});
+    const gait_core::JointDefinition& coxa = explorerRobot().legs[leg].joints[0];
+    for (int i = 0; i < 100; ++i) {
+        robot.run(0.01);
+        ASSERT_LE(robot.feedback.angles[leg](0), coxa.upper) << "tick " << i;
+        ASSERT_GE(robot.feedback.angles[leg](0), coxa.lower) << "tick " << i;
+    }
+    EXPECT_NEAR(robot.feedback.angles[leg](0), coxa.upper, 1e-6) << "held at the limit";
+    bool said = false;
+    for (const std::string& warning : warnings) {
+        said = said || warning.find("joint limit") != std::string::npos;
+    }
+    EXPECT_TRUE(said) << "warned that the leg was held at a joint limit";
+}
+
 TEST(GaitEngine, CopiedEngineDoesNotUseTheOriginalsKinematics) {
     // The built in leg is reached through a null entry, not a pointer to the engine's own member,
     // so a copy keeps working after the original is gone

@@ -130,9 +130,18 @@ struct GaitParams {
     // reacting at each. The ZMP reference runs through points inside both the feet down in one phase
     // and the next, predicted from the gait's schedule and the command, and the body's path is the
     // smoothest that tracks it (PreviewController), so it's over the next feet before they're all it
-    // has. The sway hold at a phase's start stays, as a safety net. Gaits that don't sway are untouched.
+    // has. The sway hold at a phase's start stays, as a safety net. Gaits that don't sway are untouched
+    // unless preview_dynamic_gaits says otherwise.
     bool preview_control = false;
     Scalar preview_time = Scalar(1.0);          // s of the coming gait it plans over (at most 200 ticks)
+    // With preview_control, also plan gaits that can't sway to static stability, such as a biped's
+    // walk: one foot can't hold the centre of mass over it, but it can hold the ZMP. The reference
+    // runs from foot to foot (best through phases with every foot down, see GaitPattern::fromGroups),
+    // the hold at a phase's start waits for the planned ZMP rather than the centre of mass to be over
+    // the feet that stay down (not at all for feet that make only a line or a point, which balance
+    // by stepping), and the sway is limited by what the legs can reach rather than by maxStride.
+    // Such a gait still needs allow_unstable_gaits.
+    bool preview_dynamic_gaits = false;
 
     // Joint torques (live), for robots whose actuators take a torque as well as a position: each
     // planted leg's share of carrying the robot and accelerating it as planned, tau = -J^T f, in
@@ -600,8 +609,8 @@ private:
     bool has_previous_feet = false;
 
     // Throttled log messages: when each was last sent
-    std::array<Timestamp, 10> last_throttled_log{};
-    std::array<bool, 10> throttled_log_sent{};
+    std::array<Timestamp, 11> last_throttled_log{};
+    std::array<bool, 11> throttled_log_sent{};
 
     // Add one planted foot's contact points (foot: body frame x, y): its sole turned as the leg's
     // joints turn it (q, or as last commanded), or the foot itself for a point foot
@@ -624,6 +633,14 @@ private:
     void easeSway(const Vec2& goal, Scalar dt);
     bool updateSway(Scalar dt, bool idle);
     bool holdForSway(Scalar dt, bool idle, const ContactPoints& feet, int count, const Vec2& goal);
+    bool overStayingFeet(const ContactPoints& feet, int count) const;
+    Vec2 reachableSway(const Vec2& wanted) const;
+    void followPlan(const Vec2& centre, bool capAtStride);
+    // Whether preview control plans this gait's sway (see preview_control, preview_dynamic_gaits)
+    bool previewPlans(uint8_t gait) const {
+        return p.preview_control && gait < config().numGaits() && !config().getGaitConfig(gait).empty() &&
+            (gaitSways(gait) || p.preview_dynamic_gaits);
+    }
 
     // Preview control
     struct PlannedMotion {
@@ -638,6 +655,9 @@ private:
     Vec2 preview_handover = Vec2::Zero();        // where it hands over to the next phase, as last worked out
     size_t preview_phase = 0;                    // the phase those are for
     bool preview_has_phase = false;
+    bool preview_leading = false;                // a lead-in into the feet that stay down (see previewSway)
+    Scalar preview_lead = 0;                     // s of it left
+    Vec2 preview_lead_from = Vec2::Zero();       // where its ZMP started
     std::array<Vec2, PreviewController::MAX_STEPS> preview_reference{};
     Vec2 previewSway(Scalar dt, bool idle, const ContactPoints& staying, int stayingCount);
     Vec2 predictedFoot(int legNum, int segment, const std::array<Scalar, 16>& segmentEnd, Scalar t) const;   // 16: the phases a preview reaches into

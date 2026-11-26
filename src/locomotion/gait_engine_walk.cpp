@@ -113,6 +113,20 @@ void GaitEngine::returnToStart(Scalar dt) {
     }
 
     if (phase_progress == 0) {
+        // A phase with every foot down has no foot to step back: on to the next
+        bool anySwings = false;
+        for (int legNum = 0; legNum < numLegs(); ++legNum) {
+            anySwings = anySwings || trajectoryGen.gaitState.config.swingsIn(legNum, phase);
+        }
+        if (!anySwings) {
+            phase = static_cast<uint8_t>((phase + 1) % trajectoryGen.gaitState.config.size());
+            if (++return_counter >= static_cast<int>(trajectoryGen.gaitState.config.size())) {
+                return_counter = 0;
+                idleReturning = false;
+                applyPendingGait();
+            }
+            return;
+        }
         current_phase_duration = p.phase_duration;
         // Swinging legs move to their start position, standing legs hold where they are
         std::array<Vec3, kMaxLegs> startPositions;

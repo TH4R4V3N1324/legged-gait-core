@@ -340,9 +340,10 @@ void GaitEngine::easeSway(const Vec2& goal, Scalar dt) {
  *         the feet that stay down (min_stability_margin) for the next leg to lift. Gives up after
  *         a phase's length, with a warning.
  * @note The body sways at up to sway_speed towards the nearest point sway_margin inside the feet
- *       that are down this phase, recomputed every tick since they slide back as the body walks.
- *       A gait that doesn't sway eases off any sway left behind (by gathering the feet at startup,
- *       or by a swaying gait before it) at the same speed.
+ *       that are down this phase, recomputed every tick since they slide back as the body walks,
+ *       and no further than the planted legs can reach (reachableSway). A gait that doesn't sway
+ *       eases off any sway left behind (by gathering the feet at startup, or by a swaying gait
+ *       before it) at the same speed, unless preview control plans it (preview_dynamic_gaits).
 */
 bool GaitEngine::updateSway(Scalar dt, bool idle) {
     sway_holding = false;
@@ -358,14 +359,14 @@ bool GaitEngine::updateSway(Scalar dt, bool idle) {
             count = addContactPoints(legNum, foot, feet, count);
         }
     }
-    if (!gaitSways(config().currentGait)) {
-        easeSway(Vec2::Zero(), dt);
-        return false;
-    }
-    if (p.preview_control) {
+    if (previewPlans(config().currentGait)) {
         // Planned ahead; the hold stays as a safety net
         const Vec2 goal = previewSway(dt, idle, feet, count);
         return holdForSway(dt, idle, feet, count, goal);
+    }
+    if (!gaitSways(config().currentGait)) {
+        easeSway(Vec2::Zero(), dt);
+        return false;
     }
     const Vec2 centre = com.head<2>();   // body frame; over the ground it's centre + sway
     Vec2 goal = Vec2::Zero();
@@ -373,7 +374,7 @@ bool GaitEngine::updateSway(Scalar dt, bool idle) {
         Vec2 target;
         nearestStablePoint(feet.data(), count, centre + sway,
                            std::max(p.sway_margin, p.min_stability_margin), target);
-        goal = target - centre;
+        goal = reachableSway(target - centre);
     }
     easeSway(goal, dt);
     return holdForSway(dt, idle, feet, count, goal);
@@ -385,13 +386,11 @@ bool GaitEngine::updateSway(Scalar dt, bool idle) {
  * @return Whether the phase should wait (see updateSway)
 */
 bool GaitEngine::holdForSway(Scalar dt, bool idle, const ContactPoints& feet, int count, const Vec2& goal) {
-    const Vec2 centre = com.head<2>();
-
     if (idle || phase_progress > 0) {
         sway_hold_time = 0;
         return false;
     }
-    if (stabilityMargin(feet.data(), count, centre + sway) >= p.min_stability_margin) {
+    if (overStayingFeet(feet, count)) {
         sway_hold_time = 0;
         return false;
     }
@@ -408,6 +407,81 @@ bool GaitEngine::holdForSway(Scalar dt, bool idle, const ContactPoints& feet, in
     }
     sway_holding = true;
     return true;
+}
+
+/**
+ * @brief Whether the body is far enough over the feet that stay down this phase for the next legs to lift
+ * @param[in] feet Those feet's contact points (body frame)
+ * @param[in] count How many
+ * @note A gait that sways statically: the centre of mass min_stability_margin inside them. One that
+ *       only preview control plans (preview_dynamic_gaits) can't hold the centre of mass over its
+ *       feet, only the ZMP, so the planned ZMP, and only half as far inside as the feet's deepest
+ *       point if that's less (a sole is narrow), and not before preview control's lead-in into them
+ *       has run. Feet that make only a line or a point hold nothing up either way: such a gait
+ *       balances by stepping, so there's nothing to wait for.
+*/
+bool GaitEngine::overStayingFeet(const ContactPoints& feet, int count) const {
+    const Vec2 centre = com.head<2>() + sway;
+    if (gaitSways(config().currentGait) || !previewPlans(config().currentGait)) {
+        return stabilityMargin(feet.data(), count, centre) >= p.min_stability_margin;
+    }
+    if (preview_leading && preview_lead > 0) {
+        return false;   // easing the ZMP into them first (see previewSway)
+    }
+    Vec2 deepest;
+    const Scalar depth = deepestSupportPoint(feet.data(), count, deepest);
+    if (!(depth >= BalanceController::MIN_AREA_RADIUS)) {
+        return true;
+    }
+    const Vec2 zmp = preview_started ? preview_controller.zmp() : centre;
+    return stabilityMargin(feet.data(), count, zmp) >= std::min(p.min_stability_margin, depth / 2);
+}
+
+/**
+ * @brief The furthest towards a sway that the legs can follow
+ * @param[in] wanted The sway asked for (m, body frame)
+ * @return wanted if, with the body there, every planted foot and every swinging foot's landing
+ *         target is within its leg's reach and joint limits; otherwise the furthest point towards it
+ *         from the current sway (or from none, if the current one is out of reach too) where they are
+ * @note The landing targets count too: swayed over one foot too far for the other leg to land where
+ *       it's aimed, it lands short, wider than planned, and the next sway goes further still.
+ *       Legs given kinematics with a different joint count than their definition have no limits to
+ *       judge by and are left out; so is everything with no sway asked for.
+*/
+Vec2 GaitEngine::reachableSway(const Vec2& wanted) const {
+    if (wanted.squaredNorm() == 0) {
+        return wanted;
+    }
+    auto fits = [&](const Vec2& candidate) {
+        BodyPose pose = walk_level;
+        pose.translation.x() += candidate.x() + correction.x();
+        pose.translation.y() += candidate.y() + correction.y();
+        for (int legNum = 0; legNum < numLegs(); ++legNum) {
+            if (kinematics(legNum).numJoints() != robot.legs[legNum].numJoints) {
+                continue;
+            }
+            const bool inAir = leg_swinging[legNum] && phase_progress > 0;
+            const Vec3& foot = inAir ? swing_target[legNum] : current_leg_positions[legNum];
+            const Vec3 lift(0, 0, foot_height_offset[legNum]);
+            if (!reachable(legNum, trajectoryGen.posedFoot(legNum, foot, pose) + lift)) {
+                return false;
+            }
+        }
+        return true;
+    };
+    if (fits(wanted)) {
+        return wanted;
+    }
+    const Vec2 from = fits(sway) ? sway : Vec2::Zero();
+    if (from != sway && !fits(from)) {
+        return wanted;   // nowhere near is in reach: nothing to limit it by
+    }
+    Scalar low = 0, high = 1;   // share of the way from `from` to wanted
+    for (int i = 0; i < 10; ++i) {
+        const Scalar mid = S(0.5) * (low + high);
+        (fits(from + mid * (wanted - from)) ? low : high) = mid;
+    }
+    return from + low * (wanted - from);
 }
 
 Scalar GaitEngine::gaitStabilityMargin(uint8_t gait) const {

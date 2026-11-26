@@ -4,6 +4,7 @@
 #include <string>
 
 #include "test_robots.hpp"
+#include "gait_core/locomotion/support_polygon.hpp"
 
 using gait_core::GaitParams;
 using gait_core::Scalar;
@@ -240,4 +241,120 @@ TEST(FourJointLegs, StandBackInTheSamePoseWhereverTheyWalked) {
         EXPECT_LT((robot.feedback.angles[leg] - before[leg]).cwiseAbs().maxCoeff(), 0.005) << "leg " << leg;
     }
     EXPECT_TRUE(robot.problem.empty()) << robot.problem;
+}
+
+// ---------------------------------------------------------------------------------------------
+// A biped: phases with both feet down, preview control moving the ZMP from foot to foot
+// ---------------------------------------------------------------------------------------------
+
+namespace {
+
+struct BipedWalk {
+    bool stood = false;
+    double walked = 0;
+    double swayLeft = 0, swayRight = 0;      // m, furthest the body swayed each way
+    double worstZmp = 1;                     // m, least margin of the planned ZMP in the stance sole, one foot down
+    int singleTicks = 0, doubleTicks = 0;    // ticks with one foot down, and with both
+    int switches = 0;                        // times the foot down changed
+    std::string problem;
+    std::vector<std::string> warnings;
+};
+
+/**
+ * @brief A biped standing up, then walking forward at 0.05 m/s
+ * @note A foot counts as up 3 mm above the other. The planned ZMP is judged against the sole of the
+ *       foot down, turned as its hip yaw turns it.
+*/
+BipedWalk walkBiped(const gait_core::RobotDefinition& definition, const GaitParams& params, double seconds) {
+    SimRobot robot(definition, params);
+    BipedWalk r;
+    r.stood = robot.standUp();
+    if (!r.stood) {
+        return r;
+    }
+    robot.stage = "walking";
+    robot.engine.setVelocity({sc(0.05), 0, 0});
+    const double x0 = robot.engine.odometry().x();
+    int lastStance = -1;
+    for (int i = 0; i < static_cast<int>(std::lround(seconds / 0.01)); ++i) {
+        robot.run(0.01);
+        const gait_core::Vec2 sway = robot.engine.bodySway();
+        r.swayLeft = std::max(r.swayLeft, static_cast<double>(sway.y()));
+        r.swayRight = std::max(r.swayRight, static_cast<double>(-sway.y()));
+        const Scalar z0 = robot.foot(0).z(), z1 = robot.foot(1).z();
+        if (std::abs(z0 - z1) <= sc(0.003)) {
+            ++r.doubleTicks;
+            continue;
+        }
+        const int stance = z0 < z1 ? 0 : 1;
+        ++r.singleTicks;
+        r.switches += lastStance >= 0 && stance != lastStance ? 1 : 0;
+        lastStance = stance;
+        if (robot.engine.preview().configured()) {
+            const gait_core::LegDefinition& leg = definition.legs[stance];
+            std::array<gait_core::Vec2, 4> sole;
+            gait_core::appendContactPoints(robot.foot(stance).head<2>(), leg.soleYaw(robot.feedback.angles[stance]),
+                                           leg.soleMin, leg.soleMax, sole.data(), 0);
+            // The plan is over the feet before the sway poses them
+            const gait_core::Vec2 zmp = robot.engine.preview().zmp() - sway;
+            r.worstZmp = std::min(r.worstZmp, static_cast<double>(gait_core::stabilityMargin(sole.data(), 4, zmp)));
+        }
+    }
+    r.walked = robot.engine.odometry().x() - x0;
+    r.problem = robot.problem;
+    r.warnings = robot.warnings;
+    return r;
+}
+
+}  // namespace
+
+TEST(Biped, WalksWithBothFeetDownBetweenSteps) {
+    const BipedWalk r = walkBiped(test_robots::biped(), test_robots::bipedParams(false), 8.0);
+    ASSERT_TRUE(r.stood);
+    EXPECT_TRUE(r.problem.empty()) << r.problem;
+    EXPECT_GT(r.walked, 0.15);
+    EXPECT_GE(r.switches, 8) << "one foot, then the other";
+    EXPECT_GT(r.doubleTicks, r.singleTicks / 2) << "both feet down for a phase between steps";
+}
+
+TEST(Biped, PreviewControlMovesTheZmpFromFootToFoot) {
+    const BipedWalk r = walkBiped(test_robots::biped(), test_robots::bipedParams(true), 8.0);
+    ASSERT_TRUE(r.stood);
+    EXPECT_TRUE(r.problem.empty()) << r.problem;
+    EXPECT_TRUE(r.warnings.empty()) << joined(r.warnings);
+    EXPECT_GT(r.walked, 0.15);
+    EXPECT_GE(r.switches, 8);
+    // Over each foot in turn, further than maxStride (which caps the sway of a gait that sways statically)
+    EXPECT_GT(r.swayLeft, 0.035);
+    EXPECT_GT(r.swayRight, 0.035);
+    // Setting off from standing included: the lead-in moves the weight over before the first lift
+    EXPECT_GT(r.worstZmp, 0.005) << "the planned ZMP stays inside the sole of the foot down";
+}
+
+TEST(Biped, PreviewControlLeavesItAloneUnlessAskedToPlanDynamicGaits) {
+    GaitParams params = test_robots::bipedParams(false);
+    params.preview_control = true;   // but not preview_dynamic_gaits
+    const BipedWalk r = walkBiped(test_robots::biped(), params, 4.0);
+    ASSERT_TRUE(r.stood);
+    EXPECT_EQ(r.swayLeft, 0);
+    EXPECT_EQ(r.swayRight, 0);
+}
+
+TEST(Biped, TheSwayGoesNoFurtherThanTheHipsCanRoll) {
+    // 0.12 rad of hip roll moves a foot only ~20 mm sideways under the hip: not enough to get the
+    // weight over a foot. The body sways as far as the legs reach, no joint is ever sent past its
+    // limit, and the robot keeps walking (warning that it can't get over its feet) without the
+    // feet creeping wider step by step
+    const BipedWalk wide = walkBiped(test_robots::biped(), test_robots::bipedParams(true), 20.0);
+    const BipedWalk tight = walkBiped(test_robots::biped(0.12), test_robots::bipedParams(true), 20.0);
+    ASSERT_TRUE(tight.stood);
+    EXPECT_TRUE(tight.problem.empty()) << tight.problem;
+    EXPECT_GT(tight.walked, 0.2);
+    EXPECT_LT(std::max(tight.swayLeft, tight.swayRight), 0.045);
+    EXPECT_LT(std::max(tight.swayLeft, tight.swayRight), std::max(wide.swayLeft, wide.swayRight));
+    bool warned = false;
+    for (const std::string& warning : tight.warnings) {
+        warned = warned || warning.find("couldn't sway") != std::string::npos;
+    }
+    EXPECT_TRUE(warned) << joined(tight.warnings);
 }

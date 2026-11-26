@@ -137,14 +137,29 @@ TEST(GaitSchedule, PatternsTheEngineCantRunAreRejected) {
     EXPECT_FALSE(pattern("trot60", 0.6, {0, 0.4, 0, 0.4}).schedule(4, schedule));
     // An offset between phase boundaries
     EXPECT_FALSE(pattern("odd", 0.5, {0, 0.3, 0, 0.5}).schedule(4, schedule));
-    // A phase where no leg lifts
-    EXPECT_FALSE(pattern("gap", 0.75, {0, 0.25, 0, 0.25}).schedule(4, schedule));
     // Offsets outside the cycle
     EXPECT_FALSE(pattern("late", 0.5, {0, 1.0, 0, 0.5}).schedule(4, schedule));
     // A duty factor of 1 (never lifts) or less than a half (one phase)
     EXPECT_FALSE(pattern("stand", 1.0, {0, 0, 0, 0}).schedule(4, schedule));
     EXPECT_FALSE(pattern("hop", 0.0, {0, 0, 0, 0}).schedule(4, schedule));
     EXPECT_TRUE(schedule.empty()) << "a rejected pattern leaves the schedule alone";
+}
+
+TEST(GaitSchedule, PhasesWithEveryFootDownAreAllowed) {
+    // A biped's walk: left, both down, right, both down
+    const GaitPattern walk = GaitPattern::fromGroups("walk", {{0}, {}, {1}, {}});
+    EXPECT_EQ(walk.numLegs, 2);
+    EXPECT_NEAR(walk.dutyFactor, 0.75, 1e-6);
+    expectPhases(scheduleOf(walk, 2), 4, {0, 2});
+    // The same as offsets, and a trot that pauses with all four feet down after each pair
+    expectPhases(scheduleOf(pattern("walk", 0.75, {0, 0.5}), 2), 4, {0, 2});
+    expectPhases(scheduleOf(pattern("gap", 0.75, {0, 0.25, 0, 0.25}), 4), 4, {0, 1, 0, 1});
+    // As many phases as kMaxGaitPhases, but no more
+    GaitSchedule schedule;
+    const Scalar most = static_cast<Scalar>(gait_core::kMaxGaitPhases);
+    EXPECT_TRUE(pattern("slow", (most - 1) / most, {0, 0.5}).schedule(2, schedule));
+    EXPECT_EQ(schedule.size(), static_cast<size_t>(gait_core::kMaxGaitPhases));
+    EXPECT_FALSE(pattern("slower", most / (most + 1), {0, 0}).schedule(2, schedule));
 }
 
 TEST(GaitSchedule, LongNamesAreTruncated) {

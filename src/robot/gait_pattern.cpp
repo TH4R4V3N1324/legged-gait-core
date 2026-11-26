@@ -35,13 +35,12 @@ bool GaitPattern::schedule(int robotLegs, GaitSchedule& out) const {
         return false;
     }
     const long phases = std::lround(1 / swing);
-    if (phases < 2 || phases > kMaxLegs || std::abs(static_cast<Scalar>(phases) * swing - 1) > TOLERANCE) {
+    if (phases < 2 || phases > kMaxGaitPhases || std::abs(static_cast<Scalar>(phases) * swing - 1) > TOLERANCE) {
         return false;
     }
 
     GaitSchedule result;
     result.phases = static_cast<uint8_t>(phases);
-    std::array<bool, kMaxLegs> lifts{};
     for (int leg = 0; leg < numLegs; ++leg) {
         const Scalar position = offset[leg] / swing;   // in phases
         const long phase = std::lround(position);
@@ -49,13 +48,8 @@ bool GaitPattern::schedule(int robotLegs, GaitSchedule& out) const {
             return false;
         }
         result.phaseOf[leg] = static_cast<uint8_t>(phase);
-        lifts[static_cast<size_t>(phase)] = true;
     }
-    for (long phase = 0; phase < phases; ++phase) {
-        if (!lifts[static_cast<size_t>(phase)]) {
-            return false;   // a phase where every foot stands: the engine always swings a group
-        }
-    }
+    // A phase no leg swings in has every foot down (a biped's double support)
     out = result;
     return true;
 }

@@ -101,7 +101,7 @@ void GaitEngine::computeTorques() {
     // weight. With preview control planning the body's path, where that plan puts the ZMP and what it
     // accelerates by. (Not the acceleration worked out from the commanded motion: on a dog's trot the
     // legs swinging move the centre of mass about enough to make that jitter by a lot.)
-    const bool planned = walking && p.preview_control && preview_started && gaitSways(config().currentGait);
+    const bool planned = walking && preview_started && previewPlans(config().currentGait);
     const Vec2 accel = planned ? preview_controller.acceleration() : Vec2::Zero();
     const Vec3 up = imuFresh() ? Vec3(imuTilt().inverse() * Vec3::UnitZ()) : Vec3::UnitZ();
     const Vec3 total = mass * (BalanceController::GRAVITY * up + Vec3(accel.x(), accel.y(), 0));

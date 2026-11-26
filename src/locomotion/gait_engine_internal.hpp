@@ -39,7 +39,8 @@ constexpr int LOG_UNSUPPORTED_ROBOT = 5;
 constexpr int LOG_UNSTABLE_STANCE = 6;
 constexpr int LOG_SWAY_TIMEOUT = 7;
 constexpr int LOG_JOINT_SPEED_LIMITED = 8;
-constexpr int LOG_LIFT_HOLD_TIMEOUT = 9;   // last_throttled_log and throttled_log_sent hold 10 keys
+constexpr int LOG_LIFT_HOLD_TIMEOUT = 9;
+constexpr int LOG_JOINT_RANGE_LIMITED = 10;   // last_throttled_log and throttled_log_sent hold 11 keys
 
 }  // namespace engine_internal
 }  // namespace gait_core

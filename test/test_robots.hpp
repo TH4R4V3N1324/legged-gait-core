@@ -95,6 +95,60 @@ inline RobotDefinition twoJointHexapod() {
 }
 
 /**
+ * @brief A small biped: two legs of hip yaw, hip roll, hip pitch and knee, each on a 0.10 x 0.05 m sole
+ * @param[in] hipRoll rad, how far each hip rolls either way, which bounds how far the body can sway
+ *            over a foot
+ * @note Leg 0 left, leg 1 right, hips 0.06 m either side of the body's centre and two 0.1 m links
+ *       to the foot, standing 0.17 m below the hips. It walks one foot at a time with both feet down
+ *       for a phase between steps; with one foot down it can't stand still, so its gait is allowed
+ *       only as unstable (bipedParams).
+*/
+inline RobotDefinition biped(double hipRoll = 0.35) {
+    RobotDefinition robot{};
+    robot.numLegs = 2;
+    for (int i = 0; i < 2; ++i) {
+        const double side = i == 0 ? 1 : -1;
+        LegDefinition& leg = robot.legs[i];
+        leg.mount = {0, v(0, side * 0.06, 0)};
+        leg.numJoints = 4;
+        leg.joints[0] = revolute(v(0, 0, 0), v(0, 0, 1), -0.5, 0.5);           // hip yaw
+        leg.joints[1] = revolute(v(0, 0, 0), v(1, 0, 0), -hipRoll, hipRoll);   // hip roll
+        leg.joints[2] = revolute(v(0, 0, 0), v(0, 1, 0), -1.5, 1.5);           // hip pitch
+        leg.joints[3] = revolute(v(0, 0, -0.1), v(0, 1, 0), -0.05, 2.0);       // knee, + bends it
+        leg.foot = v(0, 0, -0.1);
+        leg.solver = LegSolver::Chain;
+        leg.soleMin = gait_core::Vec2(static_cast<Scalar>(-0.05), static_cast<Scalar>(-0.025));
+        leg.soleMax = gait_core::Vec2(static_cast<Scalar>(0.05), static_cast<Scalar>(0.025));
+    }
+    robot.standReach = 0;
+    robot.standHeight = static_cast<Scalar>(-0.17);
+    robot.maxStride = static_cast<Scalar>(0.03);
+    robot.centreOfMass = v(0, 0, 0.03);
+    robot.numGaits = 1;
+    robot.gaits[0] = GaitPattern::fromGroups("walk", {{0}, {}, {1}, {}});
+    return robot;
+}
+
+/**
+ * @brief Parameters biped() runs with: seated with its feet where they stand, its one-footed gait
+ *        allowed, and preview control planning the weight from foot to foot if dynamic
+*/
+inline gait_core::GaitParams bipedParams(bool dynamic = true) {
+    gait_core::GaitParams p;
+    p.allow_unstable_gaits = true;
+    p.sit_reach = 0;
+    p.sit_height = static_cast<Scalar>(0.13);
+    p.stand_on_startup = true;
+    p.max_height = static_cast<Scalar>(0.18);
+    p.phase_duration = static_cast<Scalar>(0.4);
+    p.min_phase_duration = static_cast<Scalar>(0.3);
+    p.step_height = static_cast<Scalar>(0.03);
+    p.preview_control = dynamic;
+    p.preview_dynamic_gaits = dynamic;
+    return p;
+}
+
+/**
  * @brief Runs an engine on any robot with perfect servos: every command comes straight back as the
  *        joint state, while the engine wants the servos powered
  * @note Checks every command as it goes (sized to the leg, finite, inside the joint limits) and

@@ -94,6 +94,7 @@ Vec2 GaitEngine::previewSway(Scalar dt, bool idle, const ContactPoints& staying,
         planner.reset(centre + sway);
         preview_started = true;
         preview_has_phase = false;
+        preview_leading = false;
     }
 
     const Scalar margin = std::max(p.sway_margin, p.min_stability_margin);
@@ -101,9 +102,11 @@ Vec2 GaitEngine::previewSway(Scalar dt, bool idle, const ContactPoints& staying,
     const size_t phases = schedule.size();
     // At a phase's start, every foot still down, with the body not yet over the feet that will stay
     // down (two consecutive triangles of a crawl may share too little to hand over between): those
-    // feet are where to go, and the sway hold waits until the body is there
-    const bool overStaying = stabilityMargin(staying.data(), stayingCount, centre + sway) >= p.min_stability_margin;
-    if (!idle && phase_progress == 0 && !overStaying) {
+    // feet are where to go, and the sway hold waits until the body is there. Not for a gait that
+    // can't stand over its feet (preview_dynamic_gaits): it has to be on its way to the next ones
+    // when the legs lift, so the plan of the coming phases runs on, its clock held at the phase's
+    // start, while the hold waits for its ZMP.
+    if (!idle && phase_progress == 0 && gaitSways(config().currentGait) && !overStayingFeet(staying, stayingCount)) {
         Vec2 target = centre;
         nearestStablePoint(staying.data(), stayingCount, centre, margin, target);
         // Ramped there from where the body is rather than jumped to: a ZMP asked to jump swings the
@@ -116,8 +119,8 @@ Vec2 GaitEngine::previewSway(Scalar dt, bool idle, const ContactPoints& staying,
         }
         preview_has_phase = false;   // the phase's plan starts from here once the legs can lift
         planner.step(preview_reference.data());
-        sway = planner.position() - centre;
-        return target - centre;
+        followPlan(centre, false);
+        return reachableSway(target - centre);
     }
     if (idle && phase_progress == 0) {
         // Standing: keep the centre of mass where it is, over every foot down
@@ -133,9 +136,27 @@ Vec2 GaitEngine::previewSway(Scalar dt, bool idle, const ContactPoints& staying,
     } else {
         // The coming phases: the rest of this one, then whole ones
         const Scalar T = std::max(current_phase_duration, S(0.01));
+        // A gait that can't stand over its feet, held at a phase's start with the ZMP not yet over the
+        // feet that stay down (setting off from standing, or knocked off its plan), first gets a lead-in:
+        // the ZMP eased from where it was into those feet over a phase, then the coming phases after
+        // it. Asked to be there at once instead, it would swing the other way and then overshoot, and
+        // the body would arrive with nothing of the motion the steps after need.
+        // Once begun it runs to its end, the hold waiting (see overStayingFeet).
+        if (!gaitSways(config().currentGait) && !idle && phase_progress == 0) {
+            if (preview_leading) {
+                preview_lead = std::max(S(0.0), preview_lead - dt);
+            } else if (!overStayingFeet(staying, stayingCount)) {
+                preview_leading = true;
+                preview_lead = T;
+                preview_lead_from = planner.zmp();
+            }
+        } else {
+            preview_leading = false;
+        }
+        const Scalar lead = preview_leading ? preview_lead : S(0.0);
         std::array<Scalar, MAX_SEGMENTS> segmentEnd{};
         for (int k = 0; k < MAX_SEGMENTS; ++k) {
-            segmentEnd[static_cast<size_t>(k)] = (1 - phase_progress) * T + static_cast<Scalar>(k) * T;
+            segmentEnd[static_cast<size_t>(k)] = lead + (1 - phase_progress) * T + static_cast<Scalar>(k) * T;
         }
         // The feet down in a phase of the preview, where they'll be at time t
         auto feetIn = [&](int segment, Scalar t, ContactPoints& feet) {
@@ -182,12 +203,18 @@ Vec2 GaitEngine::previewSway(Scalar dt, bool idle, const ContactPoints& staying,
             preview_has_phase = true;
         }
         int segment = 0;
-        Scalar start = -phase_progress * T;
+        Scalar start = lead - phase_progress * T;
         Vec2 from = preview_from;
         Vec2 to = handover(0);
         preview_handover = to;
         for (int j = 0; j < steps; ++j) {
             const Scalar t = static_cast<Scalar>(j + 1) * dt;
+            if (t < lead) {
+                // The lead-in, T long, of which T - lead has gone
+                const Scalar along = std::clamp((T - lead + t) / T, S(0.0), S(1.0));
+                preview_reference[static_cast<size_t>(j)] = preview_lead_from + (preview_from - preview_lead_from) * along;
+                continue;
+            }
             while (segment + 1 < MAX_SEGMENTS && t >= segmentEnd[static_cast<size_t>(segment)]) {
                 start = segmentEnd[static_cast<size_t>(segment)];
                 ++segment;
@@ -201,13 +228,30 @@ Vec2 GaitEngine::previewSway(Scalar dt, bool idle, const ContactPoints& staying,
     }
 
     planner.step(preview_reference.data());
+    followPlan(centre, gaitSways(config().currentGait));
+    // Leading in, the hold waits for the body to get over the feet, however long that takes
+    return preview_leading ? reachableSway(preview_from - centre) : sway;
+}
+
+/**
+ * @brief Sway the body to where the planner has put the centre of mass, as far as the legs allow
+ * @param[in] centre The centre of mass in the body (body frame, x and y)
+ * @param[in] capAtStride Never further than a stride, which is all the feet of a gait that sways
+ *            statically can keep up with. A gait only preview control plans (preview_dynamic_gaits)
+ *            has to get its weight from foot to foot, however far apart: only the legs limit it.
+ * @note Out of reach, the planner is moved to where the body really is, so it plans from there
+*/
+void GaitEngine::followPlan(const Vec2& centre, bool capAtStride) {
+    PreviewController& planner = preview_controller;
     Vec2 next = planner.position() - centre;
-    // Never further than a stride: the feet couldn't keep up with more
-    if (next.norm() > config().maxStride) {
+    if (capAtStride && next.norm() > config().maxStride) {
         next *= config().maxStride / next.norm();
     }
-    sway = next;
-    return next;
+    const Vec2 limited = reachableSway(next);
+    if (limited != next) {
+        planner.reset(centre + limited, planner.velocity(), planner.acceleration());
+    }
+    sway = limited;
 }
 
 }  // namespace gait_core
