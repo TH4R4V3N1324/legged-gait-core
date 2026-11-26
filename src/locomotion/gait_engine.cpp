@@ -96,19 +96,17 @@ GaitEngine::GaitEngine(const GaitParams& params, const RobotDefinition& geometry
         output.joints[legNum] = stance;
     }
     com = liveCentreOfMass();
-    for (int legNum = 0; legNum < numLegs(); ++legNum) {
-        output.joints[legNum] = JointVec::Zero(kinematics(legNum).numJoints());
-    }
     for (int gait = 0; gait < config().numGaits(); ++gait) {
         // Whether the feet left down in each of its phases make a polygon, at the neutral stance
         const GaitSchedule schedule = config().getGaitConfig(static_cast<uint8_t>(gait));
         gait_area[gait] = !schedule.empty();
         for (size_t phase = 0; phase < schedule.size(); ++phase) {
-            std::array<Vec2, kMaxLegs> down;
+            ContactPoints down;
             int count = 0;
             for (int legNum = 0; legNum < numLegs(); ++legNum) {
                 if (!schedule.swingsIn(legNum, phase)) {
-                    down[count++] = trajectoryGen.legToBody(legNum, config().startPosition[legNum]).head<2>();
+                    const Vec2 foot = trajectoryGen.legToBody(legNum, config().startPosition[legNum]).head<2>();
+                    count = addContactPoints(legNum, foot, down, count);
                 }
             }
             gait_area[gait] = gait_area[gait] && BalanceController::hasArea(down.data(), count);
@@ -122,6 +120,10 @@ GaitEngine::GaitEngine(const GaitParams& params, const RobotDefinition& geometry
                 gait_sways[gait] = true;
             }
         }
+    }
+    // (with the soles turned as the stance turns them, so only now)
+    for (int legNum = 0; legNum < numLegs(); ++legNum) {
+        output.joints[legNum] = JointVec::Zero(kinematics(legNum).numJoints());
     }
 }
 
@@ -237,11 +239,11 @@ bool GaitEngine::everyLegReaches(const Vec3& target) const {
  * @param[in] bodySway The body's sway over those feet, which carries the centre of mass with it
 */
 Scalar GaitEngine::plantedMargin(const std::array<Vec3, kMaxLegs>& feet, const Vec2& bodySway) const {
-    std::array<Vec2, kMaxLegs> planted;
+    ContactPoints planted;
     int count = 0;
     for (int legNum = 0; legNum < numLegs(); ++legNum) {
         if (feet[legNum].allFinite()) {
-            planted[count++] = trajectoryGen.legToBody(legNum, feet[legNum]).head<2>();
+            count = addContactPoints(legNum, trajectoryGen.legToBody(legNum, feet[legNum]).head<2>(), planted, count);
         }
     }
     return stabilityMargin(planted.data(), count, com.head<2>() + bodySway);
@@ -291,11 +293,11 @@ Scalar GaitEngine::computeGaitMargin(uint8_t gait, bool sway) const {
                 : config().startPosition[legNum];
         }
         if (sway) {
-            std::array<Vec2, kMaxLegs> planted;
+            ContactPoints planted;
             int count = 0;
             for (int legNum = 0; legNum < numLegs(); ++legNum) {
                 if (feet[legNum].allFinite()) {
-                    planted[count++] = trajectoryGen.legToBody(legNum, feet[legNum]).head<2>();
+                    count = addContactPoints(legNum, trajectoryGen.legToBody(legNum, feet[legNum]).head<2>(), planted, count);
                 }
             }
             Vec2 deepest;
@@ -348,11 +350,12 @@ bool GaitEngine::updateSway(Scalar dt, bool idle) {
         easeSway(Vec2::Zero(), dt);
         return false;
     }
-    std::array<Vec2, kMaxLegs> feet;
+    ContactPoints feet;
     int count = 0;
     for (int legNum = 0; legNum < numLegs(); ++legNum) {
         if (!trajectoryGen.gaitState.config.swingsIn(legNum, phase)) {
-            feet[count++] = trajectoryGen.legToBody(legNum, current_leg_positions[legNum]).head<2>();
+            const Vec2 foot = trajectoryGen.legToBody(legNum, current_leg_positions[legNum]).head<2>();
+            count = addContactPoints(legNum, foot, feet, count);
         }
     }
     if (!gaitSways(config().currentGait)) {
@@ -381,7 +384,7 @@ bool GaitEngine::updateSway(Scalar dt, bool idle) {
  * @param[in] goal Where the sway is heading, to tell a sway still getting there from one that can't
  * @return Whether the phase should wait (see updateSway)
 */
-bool GaitEngine::holdForSway(Scalar dt, bool idle, const std::array<Vec2, kMaxLegs>& feet, int count, const Vec2& goal) {
+bool GaitEngine::holdForSway(Scalar dt, bool idle, const ContactPoints& feet, int count, const Vec2& goal) {
     const Vec2 centre = com.head<2>();
 
     if (idle || phase_progress > 0) {

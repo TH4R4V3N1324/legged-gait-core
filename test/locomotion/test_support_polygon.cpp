@@ -114,3 +114,63 @@ TEST(SupportPolygon, NearestStablePointWithTooLargeAMarginGivesTheDeepestPoint) 
     EXPECT_FALSE(gait_core::nearestStablePoint(triangle.data(), 3, v(0.3, 0.2), 0.15, nearest));
     EXPECT_NEAR((nearest - v(0.1, 0.1)).norm(), 0.0, tol(1e-9));
 }
+
+// Soles: a foot with a sole stands on its four corners
+
+namespace {
+
+std::vector<Vec2> soles(const std::vector<Vec2>& feet, Scalar yaw, const Vec2& soleMin, const Vec2& soleMax) {
+    std::vector<Vec2> points(gait_core::kMaxContactPoints);
+    int count = 0;
+    for (const Vec2& foot : feet) {
+        count = gait_core::appendContactPoints(foot, yaw, soleMin, soleMax, points.data(), count);
+    }
+    points.resize(static_cast<size_t>(count));
+    return points;
+}
+
+}  // namespace
+
+TEST(SupportPolygon, APointFootIsOneContactPoint) {
+    const std::vector<Vec2> points = soles({v(0.2, 0.1)}, 0.7f, v(0, 0), v(0, 0));
+    ASSERT_EQ(points.size(), 1u);
+    EXPECT_NEAR((points[0] - v(0.2, 0.1)).norm(), 0.0, tol(1e-9));
+}
+
+TEST(SupportPolygon, OneSoleHasAMarginAtItsCentre) {
+    // 0.2 long, 0.1 wide, the foot point 0.05 behind its centre
+    const std::vector<Vec2> points = soles({v(0, 0)}, 0, v(-0.05, -0.05), v(0.15, 0.05));
+    ASSERT_EQ(points.size(), 4u);
+    EXPECT_NEAR(margin(points, v(0.05, 0)), 0.05, tol(1e-6)) << "half its width";
+    EXPECT_LT(margin(points, v(0.2, 0)), 0) << "past its toe";
+}
+
+TEST(SupportPolygon, ASoleTurnsWithItsFoot) {
+    const std::vector<Vec2> points = soles({v(1, 0)}, static_cast<Scalar>(M_PI / 2), v(-0.05, -0.05), v(0.15, 0.05));
+    EXPECT_NEAR(margin(points, v(1, 0.05)), 0.05, tol(1e-6)) << "the centre, turned to point along y";
+    EXPECT_LT(margin(points, v(1.1, 0)), 0) << "where its toe was before turning";
+}
+
+TEST(SupportPolygon, TwoSolesSideBySideHaveAMarginBetweenThem) {
+    // Two feet 0.2 apart, each sole 0.1 square: the hull is 0.3 wide and 0.1 long
+    const std::vector<Vec2> points = soles({v(0, 0.1), v(0, -0.1)}, 0, v(-0.05, -0.05), v(0.05, 0.05));
+    ASSERT_EQ(points.size(), 8u);
+    EXPECT_NEAR(margin(points, v(0, 0)), 0.05, tol(1e-6));
+    Vec2 centre;
+    EXPECT_NEAR(gait_core::deepestSupportPoint(points.data(), static_cast<int>(points.size()), centre), 0.05, tol(1e-6));
+    Vec2 nearest;
+    EXPECT_TRUE(gait_core::nearestStablePoint(points.data(), static_cast<int>(points.size()), v(0.2, 0), 0.02, nearest));
+    EXPECT_NEAR((nearest - v(0.03, 0)).norm(), 0.0, tol(1e-6));
+}
+
+TEST(SupportPolygon, EverySoleCornerCounts) {
+    // More points than legs: none may be dropped (the last foot's corners make the hull)
+    std::vector<Vec2> feet;
+    for (int i = 0; i < gait_core::kMaxLegs; ++i) {
+        feet.push_back(v(0, 0));
+    }
+    feet.back() = v(1, 0);
+    const std::vector<Vec2> points = soles(feet, 0, v(-0.05, -0.05), v(0.05, 0.05));
+    ASSERT_EQ(points.size(), static_cast<size_t>(gait_core::kMaxContactPoints));
+    EXPECT_NEAR(margin(points, v(0.5, 0)), 0.05, tol(1e-6));
+}

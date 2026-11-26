@@ -394,6 +394,9 @@ public:
     LegSolver legSolver(int legNum) const { return leg_solver[legNum]; }
 
 private:
+    // A support polygon's ground contact points (body frame x, y): one per point foot, four per sole
+    using ContactPoints = std::array<Vec2, kMaxContactPoints>;
+
     GaitParams p;
     RobotDefinition robot;   // kept so cutting servo power can rebuild the engine
     TrajectoryGenerator trajectoryGen;
@@ -578,10 +581,10 @@ private:
     bool step_needed = false;                // the capture point needs a step this tick
     Vec2 step_offset = Vec2::Zero();         // m, body frame: how far the swinging feet land from the gait's targets
     void updateFeedback(Scalar dt, const Vec2& commandedOverGround, const Vec2& drift,
-                        const std::array<Vec2, kMaxLegs>& feet, int count);
+                        const ContactPoints& feet, int count);
     bool centreOfPressure(Vec2& cop) const;
     bool contactPolygon() const;
-    int plantedFeet(std::array<Vec2, kMaxLegs>& feet, bool staying) const;
+    int plantedFeet(ContactPoints& feet, bool staying) const;
 
     // Leg odometry
     LegOdometry legOdometry;
@@ -600,6 +603,11 @@ private:
     std::array<Timestamp, 10> last_throttled_log{};
     std::array<bool, 10> throttled_log_sent{};
 
+    // Add one planted foot's contact points (foot: body frame x, y): its sole turned as the leg's
+    // joints turn it (q, or as last commanded), or the foot itself for a point foot
+    int addContactPoints(int legNum, const Vec2& foot, ContactPoints& points, int count) const;
+    int addContactPoints(int legNum, const Vec2& foot, const JointVec& q, ContactPoints& points, int count) const;
+
     std::array<Scalar, kMaxGaits> gait_margin{};   // gaitStabilityMargin, worked out once
     std::array<bool, kMaxGaits> gait_sways{};      // gaitSways
     std::array<bool, kMaxGaits> gait_area{};       // gaitHasSupportArea
@@ -615,7 +623,7 @@ private:
     BodyPose walkPose() const;
     void easeSway(const Vec2& goal, Scalar dt);
     bool updateSway(Scalar dt, bool idle);
-    bool holdForSway(Scalar dt, bool idle, const std::array<Vec2, kMaxLegs>& feet, int count, const Vec2& goal);
+    bool holdForSway(Scalar dt, bool idle, const ContactPoints& feet, int count, const Vec2& goal);
 
     // Preview control
     struct PlannedMotion {
@@ -631,7 +639,7 @@ private:
     size_t preview_phase = 0;                    // the phase those are for
     bool preview_has_phase = false;
     std::array<Vec2, PreviewController::MAX_STEPS> preview_reference{};
-    Vec2 previewSway(Scalar dt, bool idle, const std::array<Vec2, kMaxLegs>& staying, int stayingCount);
+    Vec2 previewSway(Scalar dt, bool idle, const ContactPoints& staying, int stayingCount);
     Vec2 predictedFoot(int legNum, int segment, const std::array<Scalar, 16>& segmentEnd, Scalar t) const;   // 16: the phases a preview reaches into
 
     void cutServoPower();

@@ -64,7 +64,7 @@ Vec2 GaitEngine::predictedFoot(int legNum, int segment, const std::array<Scalar,
  *       reference doesn't either: at each swap it's somewhere both triangles can push from. The stance
  *       feet slide back as the body walks, so each point is worked out where the feet will be then.
 */
-Vec2 GaitEngine::previewSway(Scalar dt, bool idle, const std::array<Vec2, kMaxLegs>& staying, int stayingCount) {
+Vec2 GaitEngine::previewSway(Scalar dt, bool idle, const ContactPoints& staying, int stayingCount) {
     const Vec2 centre = com.head<2>();
     if (!(dt > 0)) {
         return sway;
@@ -121,12 +121,14 @@ Vec2 GaitEngine::previewSway(Scalar dt, bool idle, const std::array<Vec2, kMaxLe
     }
     if (idle && phase_progress == 0) {
         // Standing: keep the centre of mass where it is, over every foot down
-        std::array<Vec2, kMaxLegs> feet;
+        ContactPoints feet;
+        int count = 0;
         for (int legNum = 0; legNum < numLegs(); ++legNum) {
-            feet[legNum] = trajectoryGen.legToBody(legNum, current_leg_positions[legNum]).head<2>();
+            const Vec2 foot = trajectoryGen.legToBody(legNum, current_leg_positions[legNum]).head<2>();
+            count = addContactPoints(legNum, foot, feet, count);
         }
         Vec2 target = centre;
-        nearestStablePoint(feet.data(), numLegs(), centre, margin, target);
+        nearestStablePoint(feet.data(), count, centre, margin, target);
         std::fill(preview_reference.begin(), preview_reference.begin() + steps, target);
     } else {
         // The coming phases: the rest of this one, then whole ones
@@ -136,12 +138,12 @@ Vec2 GaitEngine::previewSway(Scalar dt, bool idle, const std::array<Vec2, kMaxLe
             segmentEnd[static_cast<size_t>(k)] = (1 - phase_progress) * T + static_cast<Scalar>(k) * T;
         }
         // The feet down in a phase of the preview, where they'll be at time t
-        auto feetIn = [&](int segment, Scalar t, std::array<Vec2, kMaxLegs>& feet) {
+        auto feetIn = [&](int segment, Scalar t, ContactPoints& feet) {
             int count = 0;
             const size_t phaseThen = (phase + static_cast<size_t>(segment)) % phases;
             for (int legNum = 0; legNum < numLegs(); ++legNum) {
                 if (!schedule.swingsIn(legNum, phaseThen)) {
-                    feet[count++] = predictedFoot(legNum, segment, segmentEnd, t);
+                    count = addContactPoints(legNum, predictedFoot(legNum, segment, segmentEnd, t), feet, count);
                 }
             }
             return count;
@@ -152,7 +154,7 @@ Vec2 GaitEngine::previewSway(Scalar dt, bool idle, const std::array<Vec2, kMaxLe
         // then; the hold at the next phase's start waits, every foot down, while the body moves over.
         auto handover = [&](int segment) {
             const Scalar t = segmentEnd[static_cast<size_t>(segment)];
-            std::array<Vec2, kMaxLegs> a, b;
+            ContactPoints a, b;
             const int na = feetIn(segment, t, a);
             const int nb = feetIn(segment + 1, t, b);
             // (nearestStablePoint's answer can't be the point it's given: it writes it while reading)
@@ -172,7 +174,7 @@ Vec2 GaitEngine::previewSway(Scalar dt, bool idle, const std::array<Vec2, kMaxLe
                 preview_from = preview_handover;
             } else {
                 // Just started, or let go by the hold: from where the body is, inside these feet
-                std::array<Vec2, kMaxLegs> now;
+                ContactPoints now;
                 const int nowCount = feetIn(0, 0, now);
                 nearestStablePoint(now.data(), nowCount, centre + sway, margin, preview_from);
             }

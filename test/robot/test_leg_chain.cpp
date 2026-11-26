@@ -115,3 +115,13 @@ TEST(LegChain, ExplorerMatchesTheUrdf) {
     }
 }
 
+
+TEST(LegChain, TheSolePointsWhereTheYawJointTurnsIt) {
+    const RobotDefinition robot = explorerRobot();
+    const LegDefinition& def = robot.legs[0];
+    EXPECT_FALSE(def.hasSole()) << "Explorer has point feet";
+    // The coxa turns the foot about z; the femur and tibia only tilt it
+    EXPECT_NEAR(def.soleYaw(angles(0.3, 0.4, -0.5)), 0.3, tol(1e-6));
+    EXPECT_NEAR(def.soleYaw(angles(-1.2, -0.9, 1.5)), -1.2, tol(1e-6));
+    EXPECT_EQ(def.soleYaw(JointVec::Zero(2)), 0) << "the wrong number of angles";
+}

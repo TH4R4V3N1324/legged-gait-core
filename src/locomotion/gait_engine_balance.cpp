@@ -26,11 +26,12 @@ bool GaitEngine::tiltFeasible(const BodyPose& pose, std::array<Vec3, kMaxLegs>& 
     // The centre of mass stays over the feet, judged in the frame the body stood in when tilt mode
     // began (the feet don't move; the body is posed above them)
     const Vec3 centre = trajectoryGen.unposedBodyPoint(com, pose);
-    std::array<Vec2, kMaxLegs> feet;
+    ContactPoints feet;
+    int count = 0;
     for (int legNum = 0; legNum < numLegs(); ++legNum) {
-        feet[legNum] = trajectoryGen.legToBody(legNum, tilt_ground_feet[legNum]).head<2>();
+        count = addContactPoints(legNum, trajectoryGen.legToBody(legNum, tilt_ground_feet[legNum]).head<2>(), feet, count);
     }
-    return stabilityMargin(feet.data(), numLegs(), centre.head<2>()) >= p.min_stability_margin;
+    return stabilityMargin(feet.data(), count, centre.head<2>()) >= p.min_stability_margin;
 }
 
 /**
@@ -147,13 +148,13 @@ void GaitEngine::updateWalkLeveling(Scalar dt) {
 }
 
 /**
- * @brief The feet on the ground this tick (body frame, x and y)
- * @param[out] feet Each planted foot
+ * @brief The feet on the ground this tick, as contact points (body frame, x and y)
+ * @param[out] feet Each planted foot's contact points (see addContactPoints)
  * @param[in] staying true: only those that stay down when this phase's legs lift (for the lift gate).
  *            false: every foot not mid-swing (at a phase's start the next legs are still down)
- * @return How many
+ * @return How many points
 */
-int GaitEngine::plantedFeet(std::array<Vec2, kMaxLegs>& feet, bool staying) const {
+int GaitEngine::plantedFeet(ContactPoints& feet, bool staying) const {
     const bool contact = contactPolygon();
     int count = 0;
     for (int legNum = 0; legNum < numLegs(); ++legNum) {
@@ -164,10 +165,37 @@ int GaitEngine::plantedFeet(std::array<Vec2, kMaxLegs>& feet, bool staying) cons
         }
         if (!up) {
             const Vec3& foot = contact ? measured_leg_positions[legNum] : current_leg_positions[legNum];
-            feet[count++] = trajectoryGen.legToBody(legNum, foot).head<2>();
+            const Vec2 ground = trajectoryGen.legToBody(legNum, foot).head<2>();
+            count = contact ? addContactPoints(legNum, ground, measured_angles[legNum], feet, count)
+                            : addContactPoints(legNum, ground, feet, count);
         }
     }
     return count;
+}
+
+/**
+ * @brief Add one planted foot's ground contact points, for a support polygon
+ * @param[in] legNum The leg
+ * @param[in] foot Where its foot stands (body frame, x and y)
+ * @param[in] q Its joint angles, which turn its sole (see LegDefinition::soleYaw); the ones last
+ *            commanded if q is the wrong size for the leg's definition
+ * @param[in,out] points The contact points so far
+ * @param[in] count How many there are so far
+ * @return How many there are now: one more for a point foot, four for a sole
+ * @note Every support polygon the engine judges is built through here. A foot not yet down (a
+ *       landing target, a foot the preview predicts) is taken as turned the way its leg is now.
+*/
+int GaitEngine::addContactPoints(int legNum, const Vec2& foot, const JointVec& q, ContactPoints& points, int count) const {
+    const LegDefinition& leg = robot.legs[legNum];
+    if (!leg.hasSole()) {
+        return appendContactPoints(foot, 0, leg.soleMin, leg.soleMax, points.data(), count);
+    }
+    const JointVec& angles = q.size() == leg.numJoints ? q : output.joints[legNum];
+    return appendContactPoints(foot, leg.mount.yaw + leg.soleYaw(angles), leg.soleMin, leg.soleMax, points.data(), count);
+}
+
+int GaitEngine::addContactPoints(int legNum, const Vec2& foot, ContactPoints& points, int count) const {
+    return addContactPoints(legNum, foot, output.joints[legNum], points, count);
 }
 
 /**
@@ -254,7 +282,7 @@ void GaitEngine::limitAcceleration(Scalar dt) {
     // The change at the centre of mass: turning faster carries it round the body origin
     const Vec2 c = com.head<2>() + sway + correction;
     const Vec2 acceleration(dForward - dYaw * c.y(), dLeft + dYaw * c.x());
-    std::array<Vec2, kMaxLegs> feet;
+    ContactPoints feet;
     const int count = plantedFeet(feet, false);
     const Scalar scale = balance_controller.accelerationScale(acceleration / dt, feet.data(), count, p.min_stability_margin);
     applied_intent.forward += scale * dForward;
@@ -278,7 +306,7 @@ bool GaitEngine::holdLift(Scalar dt) {
         lift_hold_time = 0;
         return false;
     }
-    std::array<Vec2, kMaxLegs> feet;
+    ContactPoints feet;
     const int count = plantedFeet(feet, true);
     if (balance_controller.canLift(feet.data(), count, p.min_stability_margin)) {
         lift_hold_time = 0;
@@ -308,7 +336,7 @@ bool GaitEngine::holdLift(Scalar dt) {
 */
 void GaitEngine::updateBalance(Scalar dt, Scalar moveScale) {
     com = liveCentreOfMass();
-    std::array<Vec2, kMaxLegs> feet;
+    ContactPoints feet;
     const int count = plantedFeet(feet, false);
     Scalar footHeight = 0;
     int heights = 0;
@@ -366,8 +394,8 @@ void GaitEngine::updateBalance(Scalar dt, Scalar moveScale) {
  *            this tick, sway and correction included (m/s): what leg odometry would measure if the
  *            robot did exactly as told
  * @param[in] drift How fast the centre of mass moved within the body this tick (the legs, m/s)
- * @param[in] feet The support polygon this tick
- * @param[in] count How many feet
+ * @param[in] feet The support polygon this tick, as contact points
+ * @param[in] count How many points
  * @note The measured c dot is the body's velocity over the ground (leg odometry, which sees the
  *       sway and the correction moving the body over its feet, blended with the IMU) plus the centre
  *       of mass moving within the body (the legs). The commanded c dot counts the same sway and
@@ -379,7 +407,7 @@ void GaitEngine::updateBalance(Scalar dt, Scalar moveScale) {
  *       short of min_stability_margin inside the feet, or the correction can't go any further.
 */
 void GaitEngine::updateFeedback(Scalar dt, const Vec2& commandedOverGround, const Vec2& drift,
-                                const std::array<Vec2, kMaxLegs>& feet, int count) {
+                                const ContactPoints& feet, int count) {
     constexpr Scalar RETURN_TIME = S(1.0);   // s, how fast an unneeded correction eases back
     if (!(p.balance_feedback || p.foot_placement) || !(dt > 0)) {
         velocity_estimator.reset();

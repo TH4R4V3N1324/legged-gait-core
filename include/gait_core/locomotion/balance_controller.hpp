@@ -18,7 +18,7 @@ struct BalanceState {
     Scalar omega = 0;                      // 1/s, sqrt(g / h)
     Vec2 capturePoint = Vec2::Zero();      // m, xi = c + c dot / omega: where the body could come to rest
     Vec2 zmp = Vec2::Zero();               // m, c - c double dot / omega^2: where the feet must push from
-    int plantedCount = 0;                  // feet on the ground
+    int plantedCount = 0;                  // contact points on the ground: feet, or 4 per sole
     bool supportArea = false;              // whether they make a polygon with an inside (three or more, not in a line)
     Scalar comMargin = 0;                  // m
     Scalar captureMargin = 0;              // m

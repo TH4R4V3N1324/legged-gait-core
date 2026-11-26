@@ -16,6 +16,9 @@ Scalar cross(const Vec2& a, const Vec2& b, const Vec2& c) {
     return (b.x() - a.x()) * (c.y() - a.y()) - (b.y() - a.y()) * (c.x() - a.x());
 }
 
+// A convex hull: the chain holds one more point than it has corners while it's built
+using Hull = std::array<Vec2, kMaxContactPoints + 1>;
+
 Scalar distanceToSegment(const Vec2& point, const Vec2& a, const Vec2& b) {
     const Vec2 ab = b - a;
     const Scalar length2 = ab.squaredNorm();
@@ -26,13 +29,13 @@ Scalar distanceToSegment(const Vec2& point, const Vec2& a, const Vec2& b) {
 /**
  * @brief Convex hull of some feet, anticlockwise (Andrew's monotone chain)
  * @return How many points it has: 1 for one foot or repeats of it, 2 for feet in a line
- * @note Points in a line or repeated are dropped. count must be 1..kMaxLegs.
+ * @note Points in a line or repeated are dropped. count must be 1..kMaxContactPoints.
 */
-int convexHull(const Vec2* feet, int count, std::array<Vec2, 2 * kMaxLegs>& hull) {
-    count = std::min(count, kMaxLegs);
-    // By x then y. An insertion sort: at most kMaxLegs points, and std::sort here made GCC warn
-    // about indices it can't rule out
-    std::array<Vec2, kMaxLegs> sorted;
+int convexHull(const Vec2* feet, int count, Hull& hull) {
+    count = std::min(count, kMaxContactPoints);
+    // By x then y. An insertion sort: at most kMaxContactPoints points, and std::sort here made GCC
+    // warn about indices it can't rule out
+    std::array<Vec2, kMaxContactPoints> sorted;
     for (int i = 0; i < count; ++i) {
         const Vec2 point = feet[i];
         int j = i;
@@ -63,11 +66,11 @@ int convexHull(const Vec2* feet, int count, std::array<Vec2, 2 * kMaxLegs>& hull
  * @brief A hull's edges as inward half-planes: a point x is inside edge i by normal[i].x - offset[i]
 */
 struct Edges {
-    std::array<Vec2, 2 * kMaxLegs> normal;
-    std::array<Scalar, 2 * kMaxLegs> offset;
+    std::array<Vec2, kMaxContactPoints> normal;
+    std::array<Scalar, kMaxContactPoints> offset;
     int count = 0;
 
-    Edges(const std::array<Vec2, 2 * kMaxLegs>& hull, int size) {
+    Edges(const Hull& hull, int size) {
         for (int i = 0; i < size; ++i) {
             const Vec2 along = hull[(i + 1) % size] - hull[i];
             normal[i] = Vec2(-along.y(), along.x()).normalized();   // anticlockwise: inward is left
@@ -89,11 +92,11 @@ struct Edges {
 }  // namespace
 
 Scalar stabilityMargin(const Vec2* feet, int count, const Vec2& point) {
-    count = std::clamp(count, 0, kMaxLegs);
+    count = std::clamp(count, 0, kMaxContactPoints);
     if (count == 0) {
         return -kInfinity;
     }
-    std::array<Vec2, 2 * kMaxLegs> hull;
+    Hull hull;
     const int size = convexHull(feet, count, hull);
     if (size < 3) {
         // A foot or a line: nowhere to balance, at best on the edge
@@ -113,18 +116,18 @@ Scalar stabilityMargin(const Vec2* feet, int count, const Vec2& point) {
 }
 
 Scalar deepestSupportPoint(const Vec2* feet, int count, Vec2& centre) {
-    count = std::clamp(count, 0, kMaxLegs);
+    count = std::clamp(count, 0, kMaxContactPoints);
     if (count == 0) {
         return -kInfinity;
     }
-    std::array<Vec2, 2 * kMaxLegs> hull;
+    Hull hull;
     const int size = convexHull(feet, count, hull);
     if (size < 3) {
         centre = (hull[0] + hull[size - 1]) / 2;
         return 0;
     }
     // The largest inscribed circle touches three edges: try every three, keep the deepest centre
-    // that is inside all of them (at most 6 edges, so 20 tries)
+    // that is inside all of them (6 point feet: at most 6 edges, so 20 tries)
     const Edges edges(hull, size);
     Scalar best = -kInfinity;
     for (int i = 0; i < size; ++i) {
@@ -155,12 +158,12 @@ Scalar deepestSupportPoint(const Vec2* feet, int count, Vec2& centre) {
 }
 
 bool nearestStablePoint(const Vec2* feet, int count, const Vec2& point, Scalar margin, Vec2& nearest) {
-    count = std::clamp(count, 0, kMaxLegs);
+    count = std::clamp(count, 0, kMaxContactPoints);
     if (count == 0) {
         nearest = point;
         return false;
     }
-    std::array<Vec2, 2 * kMaxLegs> hull;
+    Hull hull;
     const int size = convexHull(feet, count, hull);
     if (size < 3) {
         deepestSupportPoint(feet, count, nearest);
@@ -202,6 +205,25 @@ bool nearestStablePoint(const Vec2* feet, int count, const Vec2& point, Scalar m
     }
     deepestSupportPoint(feet, count, nearest);
     return false;
+}
+
+int appendContactPoints(const Vec2& foot, Scalar yaw, const Vec2& soleMin, const Vec2& soleMax,
+                        Vec2* points, int count) {
+    count = std::clamp(count, 0, kMaxContactPoints);
+    if (soleMin == soleMax) {
+        if (count < kMaxContactPoints) {
+            points[count++] = foot;
+        }
+        return count;
+    }
+    const Rotation2D turn(yaw);
+    const Vec2 corners[4] = {soleMin, Vec2(soleMax.x(), soleMin.y()), soleMax, Vec2(soleMin.x(), soleMax.y())};
+    for (const Vec2& corner : corners) {
+        if (count < kMaxContactPoints) {
+            points[count++] = foot + turn * corner;
+        }
+    }
+    return count;
 }
 
 }  // namespace gait_core

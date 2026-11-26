@@ -56,6 +56,8 @@ void GaitEngine::computeTorques() {
     std::array<int, kMaxLegs> legs{};
     std::array<Vec3, kMaxLegs> feet;
     std::array<Vec2, kMaxLegs> ground;
+    ContactPoints support;   // the polygon the centre of pressure must stay in: ground, with any soles
+    int supportCount = 0;
     std::array<Scalar, kMaxLegs> ramp{};
     std::array<JointVec, kMaxLegs> angles;
     int count = 0;
@@ -88,6 +90,7 @@ void GaitEngine::computeTorques() {
         angles[count] = q;
         feet[count] = trajectoryGen.legToBody(legNum, kinematics(legNum).fk(q));
         ground[count] = feet[count].head<2>();
+        supportCount = addContactPoints(legNum, ground[count], q, support, supportCount);
         ++count;
     }
     if (count == 0) {
@@ -104,7 +107,8 @@ void GaitEngine::computeTorques() {
     const Vec3 total = mass * (BalanceController::GRAVITY * up + Vec3(accel.x(), accel.y(), 0));
     Vec2 cop = planned ? preview_controller.zmp() + correction : Vec2(com.head<2>() + sway + correction);
     Vec2 inside;
-    if (stabilityMargin(ground.data(), count, cop) < 0 && nearestStablePoint(ground.data(), count, cop, 0, inside)) {
+    if (stabilityMargin(support.data(), supportCount, cop) < 0 &&
+        nearestStablePoint(support.data(), supportCount, cop, 0, inside)) {
         cop = inside;
     }
 

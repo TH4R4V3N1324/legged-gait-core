@@ -46,6 +46,10 @@ inline constexpr int kMaxJointsPerLeg = GAIT_CORE_MAX_JOINTS;
 // (RobotDefinition::numLegs) is a runtime value, but it must be <= this value
 inline constexpr int kMaxLegs = GAIT_CORE_MAX_LEGS;
 
+// The most ground contact points a support polygon is built from: four corners for each foot with
+// a sole (LegDefinition::soleMin, soleMax), one for each point foot
+inline constexpr int kMaxContactPoints = 4 * kMaxLegs;
+
 using JointVec = Eigen::Matrix<Scalar, Eigen::Dynamic, 1, Eigen::ColMajor, kMaxJointsPerLeg, 1>;
 using LegJacobian = Eigen::Matrix<Scalar, 3, Eigen::Dynamic, Eigen::ColMajor, 3, kMaxJointsPerLeg>;
 
