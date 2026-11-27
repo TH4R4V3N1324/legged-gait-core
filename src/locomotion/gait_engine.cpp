@@ -67,6 +67,11 @@ GaitEngine::GaitEngine(const GaitParams& params, const RobotDefinition& geometry
     stand_reach = config().startPos.x();
     stand_height = target_height;
 
+    for (int i = 0; i < kMaxAppendages; ++i) {
+        const int joints = i < numAppendages() ? robot.appendages[i].numJoints : 0;
+        appendage_angles[i] = JointVec::Zero(joints);
+        output.appendageTorques[i] = JointVec::Zero(joints);
+    }
     current_leg_positions.fill(Vec3::Zero());
     measured_leg_positions.fill(Vec3::Zero());
     startup_start_positions.fill(Vec3::Zero());
@@ -253,7 +258,8 @@ Scalar GaitEngine::plantedMargin(const std::array<Vec3, kMaxLegs>& feet, const V
  * @brief The whole robot's centre of mass, with each leg where its joints were last commanded
  * @return Body frame (m). RobotDefinition::centreOfMass if the robot gives no masses (bodyMass 0).
  * @note Uses each leg's definition with output.joints, so a leg given other kinematics with a
- *       different joint count adds nothing.
+ *       different joint count adds nothing. Each appendage counts where its joints were last
+ *       reported, with what it holds at its tip.
 */
 Vec3 GaitEngine::liveCentreOfMass() const {
     if (!(robot.bodyMass > 0)) {
@@ -265,6 +271,12 @@ Vec3 GaitEngine::liveCentreOfMass() const {
         const MassMoment leg = legMass(robot.legs[legNum], output.joints[legNum]);
         if (leg.mass > 0) {
             total.add(leg.mass, trajectoryGen.legToBody(legNum, leg.centre()));
+        }
+    }
+    for (int i = 0; i < numAppendages(); ++i) {
+        const MassMoment part = appendageMass(robot.appendages[i], appendage_angles[i], appendage_payload[i]);
+        if (part.mass > 0) {
+            total.add(part.mass, appendageToBody(i, part.centre()) + robot.appendages[i].mount.translation_offset);
         }
     }
     return total.centre(robot.centreOfMass);

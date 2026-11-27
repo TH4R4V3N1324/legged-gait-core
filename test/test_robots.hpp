@@ -95,6 +95,30 @@ inline RobotDefinition twoJointHexapod() {
 }
 
 /**
+ * @brief Explorer with an arm on the front of its body: a turntable (yaw) then a shoulder (pitch,
+ *        + lowers it), and a 0.15 m link of 0.3 kg to its tip, which can carry up to 1 kg
+*/
+inline gait_core::AppendageDefinition testArm() {
+    gait_core::AppendageDefinition arm;
+    arm.mount = {0, v(0.1, 0, 0.05)};
+    arm.numJoints = 2;
+    arm.joints[0] = revolute(v(0, 0, 0), v(0, 0, 1), -3.2, 3.2);    // turntable
+    arm.joints[1] = revolute(v(0, 0, 0.02), v(0, 1, 0), -1.6, 1.6); // shoulder
+    arm.joints[1].mass = static_cast<Scalar>(0.3);
+    arm.joints[1].centreOfMass = v(0.075, 0, 0);
+    arm.tip = v(0.15, 0, 0);
+    arm.maxPayload = 1;
+    return arm;
+}
+
+inline RobotDefinition explorerWithArm() {
+    RobotDefinition robot = explorerRobot();
+    robot.numAppendages = 1;
+    robot.appendages[0] = testArm();
+    return robot;
+}
+
+/**
  * @brief A small biped: two legs of hip yaw, hip roll, hip pitch and knee, each on a 0.10 x 0.05 m sole
  * @param[in] hipRoll rad, how far each hip rolls either way, which bounds how far the body can sway
  *            over a foot
@@ -192,6 +216,7 @@ public:
             }
             now += 10'000'000;
             const gait_core::GaitOutput out = engine.update(static_cast<Scalar>(0.01), now);
+            last = out;
             servoPower = out.servoPower;
             if (engine.catchingStep()) {
                 if (catchingTicks == 0) {
@@ -235,6 +260,7 @@ public:
     RobotDefinition definition;
     gait_core::GaitEngine engine;
     gait_core::JointFeedback feedback;
+    gait_core::GaitOutput last;          // the latest update's output
     gait_core::Timestamp now = 1'000'000'000;
     bool servoPower;
     bool sensors = false;                // feed a level IMU, and joint efforts with the lowest feet carrying the weight

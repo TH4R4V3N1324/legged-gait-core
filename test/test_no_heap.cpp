@@ -7,11 +7,13 @@
 #include "test_robots.hpp"
 
 #include <atomic>
+#include <cmath>
 #include <cstdlib>
 #include <new>
 #include <vector>
 
 #include "gait_core/kinematics/chain_kinematics.hpp"
+#include "gait_core/kinematics/mass_properties.hpp"
 #include "gait_core/locomotion/gait_engine.hpp"
 #include "gait_core/robot/robot_definition.hpp"
 #include "gait_core/behaviour/battery_monitor.hpp"
@@ -304,4 +306,54 @@ TEST(NoHeap, FourJointLegsNeverAllocate) {
 
 TEST(NoHeap, TwoJointLegsNeverAllocate) {
     EXPECT_EQ(allocationsRunning(test_robots::twoJointHexapod(), 0.05, false), 0);
+}
+
+TEST(NoHeap, AnArmSwingingAndCarryingNeverAllocates) {
+    // Explorer with an arm, walking with torque output, the arm reported moving and its efforts
+    // holding a load: the payload estimate, the centre of mass and the hold torques every tick
+    gait_core::GaitParams params;
+    params.torque_output = true;
+    const gait_core::RobotDefinition robot = test_robots::explorerWithArm();
+    GaitEngine engine{params, robot};
+    engine.log = [](LogLevel, const char*) { ++logged; };
+    JointFeedback feedback;
+    for (int leg = 0; leg < robot.numLegs; ++leg) {
+        feedback.present[leg] = true;
+        feedback.angles[leg] = JointVec::Zero(robot.legs[leg].numJoints);
+    }
+    feedback.hasEffort = true;
+    feedback.appendagePresent[0] = true;
+    feedback.appendageAngles[0] = JointVec::Zero(2);
+    const Vec3 down(0, 0, static_cast<Scalar>(-9.81));
+    Timestamp now = 1'000'000'000;
+    int tick = 0;
+    auto run = [&](double seconds) {
+        const int ticks = static_cast<int>(seconds / 0.01 + 0.5);
+        for (int i = 0; i < ticks; ++i, ++tick) {
+            feedback.appendageAngles[0](0) = static_cast<Scalar>(0.8 * std::sin(tick * 0.05));
+            feedback.appendageAngles[0](1) = static_cast<Scalar>(0.4 * std::sin(tick * 0.03));
+            feedback.appendageEffort[0] = gait_core::appendageHoldTorques(robot.appendages[0], feedback.appendageAngles[0],
+                                                                          down, static_cast<Scalar>(0.5));
+            feedback.stamp = now;
+            engine.onJointStates(feedback);
+            now += 10'000'000;
+            const GaitOutput out = engine.update(static_cast<Scalar>(0.01), now);
+            if (out.commanded) {
+                for (int leg = 0; leg < robot.numLegs; ++leg) {
+                    feedback.angles[leg] = out.joints[leg];
+                }
+            }
+        }
+    };
+    run(3.0);
+    engine.sit(false);
+    run(8.0);
+
+    const long before = allocations.load();
+    engine.setVelocity({static_cast<Scalar>(0.05), 0, 0});
+    run(5.0);
+    engine.setVelocity({0, 0, 0});
+    run(2.0);
+    EXPECT_EQ(allocations.load() - before, 0) << "allocations while the arm moved and carried";
+    EXPECT_GT(engine.appendagePayload(0), 0.4) << "it worked the load out";
 }

@@ -201,6 +201,10 @@ void GaitEngine::cutServoPower() {
         fresh.setLegKinematics(legNum, legKinematics[legNum]);
     }
     fresh.legOdometry = legOdometry;
+    // The head or arm stays where it is, holding what it holds
+    fresh.appendage_angles = appendage_angles;
+    fresh.appendage_payload = appendage_payload;
+    fresh.payload_set = payload_set;
     fresh.body_roll = body_roll;
     fresh.body_pitch = body_pitch;
     fresh.body_yaw = body_yaw;

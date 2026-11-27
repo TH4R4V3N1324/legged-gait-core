@@ -1,6 +1,7 @@
 #ifndef GAIT_CORE__GAIT_ENGINE_HPP
 #define GAIT_CORE__GAIT_ENGINE_HPP
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <functional>
@@ -48,6 +49,7 @@ struct GaitParams {
     Scalar contact_force_on = Scalar(2.0);      // N, vertical force above which a foot is in contact
     Scalar contact_force_off = Scalar(1.0);     // N, below which it no longer is
     Scalar foot_force_filter = Scalar(0.05);    // s, time constant of the force low-pass filter
+    Scalar payload_filter = Scalar(0.5);        // s, time constant of an appendage's payload estimate (see AppendageDefinition)
     Scalar blocked_force_ratio = Scalar(0.3);   // net horizontal / vertical foot force above which the robot is blocked
 
     // Load balancing (live)
@@ -184,6 +186,13 @@ struct JointFeedback {
     // and torque output loads only feet that really are down.
     bool hasContact = false;
     std::array<bool, kMaxLegs> contact{};
+    // The robot's appendages (RobotDefinition::appendages), indexed by appendage number: angles body
+    // to tip, sized to its numJoints, and with hasEffort the efforts, which tell the engine what load
+    // the tip holds (see AppendageDefinition::maxPayload). Not reported (appendagePresent false), an
+    // appendage stays where it last was.
+    std::array<JointVec, kMaxAppendages> appendageAngles;     // rad
+    std::array<bool, kMaxAppendages> appendagePresent{};
+    std::array<JointVec, kMaxAppendages> appendageEffort;     // N m the servos apply, same order
 
     JointFeedback() {
         angles.fill(JointVec::Zero(YawPitchPitchLeg::kNumJoints));
@@ -227,6 +236,10 @@ struct GaitOutput {
     // for swinging legs. hasTorques is false when there are none (off, no masses, no foot down).
     bool hasTorques = false;
     std::array<JointVec, kMaxLegs> torques;
+    // With GaitParams::torque_output and masses: for each appendage, the torque each joint needs to
+    // hold it and its payload up against gravity (N m, body to tip), to add to its own position
+    // control. Sized to the appendage's numJoints; empty for appendages the robot doesn't have.
+    std::array<JointVec, kMaxAppendages> appendageTorques;
 
     // Zeros, never empty; the engine resizes each leg to its kinematics' numJoints()
     GaitOutput() {
@@ -377,6 +390,19 @@ public:
     FootholdPlanner* footholdPlanner = nullptr;             // optional, not owned
     void setLegKinematics(int legNum, const LegKinematics* kinematics);  // not owned; null = built in
     int numLegs() const { return robot.numLegs; }
+    // The robot's appendages (heads, arms: see AppendageDefinition)
+    int numAppendages() const { return std::clamp(robot.numAppendages, 0, kMaxAppendages); }
+    // Where an appendage's joints last were (rad, body to tip): from JointFeedback, zeros until then
+    const JointVec& appendageAngles(int appendage) const { return appendage_angles[appendage]; }
+    // kg an appendage holds at its tip: as set (setAppendagePayload), or else as worked out from its
+    // joints' efforts (up to its maxPayload; 0 if that's 0 or no efforts have come)
+    Scalar appendagePayload(int appendage) const { return appendage_payload[appendage]; }
+    /**
+     * @brief Say what an appendage holds at its tip, for a robot that knows (or can't measure it)
+     * @param[in] appendage The appendage, 0..numAppendages() - 1; others are ignored
+     * @param[in] kg The load's mass; negative goes back to working it out from the efforts
+    */
+    void setAppendagePayload(int appendage, Scalar kg);
     // m, how far the centre of mass stays inside the planted feet through a gait's phases, at the
     // worst: at the feet's neutral stance, less maxStride for how far they sweep while walking.
     // For a gait that sways, how far it could be with the body moved over the feet.
@@ -594,6 +620,16 @@ private:
     bool centreOfPressure(Vec2& cop) const;
     bool contactPolygon() const;
     int plantedFeet(ContactPoints& feet, bool staying) const;
+
+    // Appendages (see AppendageDefinition): where their joints are, what they hold, and since when
+    std::array<JointVec, kMaxAppendages> appendage_angles;
+    std::array<Scalar, kMaxAppendages> appendage_payload{};
+    std::array<bool, kMaxAppendages> payload_set{};          // setAppendagePayload, not the efforts
+    std::array<Timestamp, kMaxAppendages> payload_stamp{};
+    std::array<bool, kMaxAppendages> has_payload_stamp{};
+    void updateAppendages(const JointFeedback& feedback);
+    Vec3 gravityInBody() const;
+    Vec3 appendageToBody(int appendage, const Vec3& vector) const;   // a direction, so without the offset
 
     // Leg odometry
     LegOdometry legOdometry;

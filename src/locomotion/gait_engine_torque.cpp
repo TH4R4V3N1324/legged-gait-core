@@ -22,6 +22,12 @@ Scalar GaitEngine::totalMass() const {
             mass += robot.legs[legNum].joints[j].mass;
         }
     }
+    for (int i = 0; i < numAppendages(); ++i) {
+        for (int j = 0; j < robot.appendages[i].numJoints; ++j) {
+            mass += robot.appendages[i].joints[j].mass;
+        }
+        mass += appendage_payload[i];
+    }
     return mass;
 }
 
@@ -43,9 +49,22 @@ void GaitEngine::computeTorques() {
     for (int legNum = 0; legNum < numLegs(); ++legNum) {
         output.torques[legNum] = JointVec::Zero(output.joints[legNum].size());
     }
+    for (int i = 0; i < numAppendages(); ++i) {
+        output.appendageTorques[i] = JointVec::Zero(robot.appendages[i].numJoints);
+    }
     const Scalar mass = totalMass();
     if (!p.torque_output || !output.commanded || !(mass > 0)) {
         return;
+    }
+    // Each appendage held up where it is, with its load (tilted by the IMU while it's fresh)
+    const Vec3 gravity = gravityInBody();
+    for (int i = 0; i < numAppendages(); ++i) {
+        const AppendageDefinition& appendage = robot.appendages[i];
+        const JointVec hold = appendageHoldTorques(appendage, appendage_angles[i],
+            AngleAxis(-appendage.mount.yaw, Vec3::UnitZ()) * gravity, appendage_payload[i]);
+        if (hold.size() == appendage.numJoints) {
+            output.appendageTorques[i] = hold;
+        }
     }
 
     // The feet down, where the joints sent put them (body frame), and how much of its share each

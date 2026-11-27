@@ -34,7 +34,8 @@ controllers can use them too.
 
 | Header | Contents |
 | --- | --- |
-| `robot_definition.hpp` | `RobotDefinition`: the legs (`numLegs`, up to `GAIT_CORE_MAX_LEGS`), neutral stance, max stride, centre of mass, body mass and gaits. With masses given (`bodyMass` > 0), `centreOfMass` is the body's own and the engine adds the legs' links where the joints put them; without, it's the whole robot's and fixed |
+| `robot_definition.hpp` | `RobotDefinition`: the legs (`numLegs`, up to `GAIT_CORE_MAX_LEGS`), neutral stance, max stride, centre of mass, body mass and gaits. With masses given (`bodyMass` > 0), `centreOfMass` is the body's own and the engine adds the legs' links where the joints put them; without, it's the whole robot's and fixed. Also its appendages (`numAppendages`, up to `GAIT_CORE_MAX_APPENDAGES`) |
+| `appendage_definition.hpp` | `AppendageDefinition`: a head, arm or mast on the body that isn't a leg: its mount, joint chain (with masses), tip and `maxPayload`. The engine doesn't move it but follows it: given its angles in `JointFeedback::appendageAngles`, its links count towards the centre of mass and weight wherever they are, and so does what it holds at its tip, set with `setAppendagePayload` or worked out from `JointFeedback::appendageEffort` (the effort beyond what its own links need, up to `maxPayload`; 0, as for a head, never estimates one). With `torque_output`, `GaitOutput::appendageTorques` holds it up |
 | `leg_definition.hpp` | `LegDefinition`: where the leg is mounted, its joint chain, the foot, which solver to use (`LegSolver`), and its own `stanceOffset` from the shared stance |
 | `joint_definition.hpp` | `JointDefinition`: a revolute joint's origin, axis, limits and speed limit, and the mass and centre of mass of the link it turns (as a URDF `<inertial>` gives them) |
 | `gait_pattern.hpp` | `GaitPattern`: a gait as a duty factor and per-leg offsets (`fromGroups` for groups that take turns); `GaitSchedule`, the phases the engine runs it as |
@@ -45,7 +46,7 @@ controllers can use them too.
 | --- | --- |
 | `leg_kinematics.hpp` | `LegKinematics`: FK, IK from a seed, Jacobian, and foot force from joint torques, for any number of joints |
 | `chain_kinematics.hpp` | `ChainKinematics`: any `LegDefinition`, with exact FK/Jacobian and numerical IK (damped least squares) |
-| `mass_properties.hpp` | `legMass`: a leg's links' total mass and first moment for some joint angles; `MassMoment` adds them up into a centre of mass |
+| `mass_properties.hpp` | `legMass`: a leg's links' total mass and first moment for some joint angles; `MassMoment` adds them up into a centre of mass. `appendageMass`, `appendageHoldTorques` and `appendagePayloadTorques` do the same for an appendage, with a load at its tip, and the torques that hold it up |
 | `yaw_pitch_pitch_leg.hpp` | `YawPitchPitchLeg`: exact analytic kinematics for a yaw joint then two pitch joints (coxa/femur/tibia) |
 
 ### Locomotion (`locomotion/`)
@@ -173,6 +174,7 @@ GoogleTest is used from the system if installed, otherwise downloaded.
 | `GAIT_CORE_BUILD_TESTS` | `ON` when top-level | Build the test suite |
 | `GAIT_CORE_MAX_LEGS` | `6` | Most legs a robot can have (sizes every per-leg array). Explorer needs 6 |
 | `GAIT_CORE_MAX_JOINTS` | `6` | Most joints in one leg (sizes `JointVec`). The protocol carries up to 6 |
+| `GAIT_CORE_MAX_APPENDAGES` | `2` | Most appendages (heads, arms) a robot can have (sizes their arrays); 0 for none |
 
 `Scalar` defaults to `float` because the microcontroller targets have no or single-precision
 FPUs. CI runs the tests with both `float` and `double`, and cross-compiles for Cortex-M0+.

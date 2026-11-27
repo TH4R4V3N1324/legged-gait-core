@@ -1,6 +1,7 @@
 // GaitEngine: sensor inputs, foot forces and leg odometry. One class over several files; see gait_engine.cpp.
 
 #include "gait_engine_internal.hpp"
+#include "gait_core/kinematics/mass_properties.hpp"
 
 namespace gait_core {
 
@@ -61,6 +62,7 @@ bool GaitEngine::controllerImuFresh() const {
  *       aren't sized to its kinematics' numJoints() counts as not received.
 */
 bool GaitEngine::onJointStates(const JointFeedback& feedback) {
+    updateAppendages(feedback);
     bool all_found = true;
     for (int legNum = 0; legNum < numLegs(); ++legNum) {
         const LegKinematics& leg = kinematics(legNum);
@@ -88,6 +90,71 @@ bool GaitEngine::onJointStates(const JointFeedback& feedback) {
         return updateLegOdometry(feedback.stamp);
     }
     return false;
+}
+
+/**
+ * @brief Take the appendages' joint states: where they are, and from their efforts what they hold
+ * @param[in] feedback The joint state
+ * @note An appendage's payload is worked out where it's allowed one (maxPayload > 0) and hasn't been
+ *       set: the efforts beyond what its own links need to stay up, as a weight hanging at the tip,
+ *       by least squares over its joints (so with one joint, or several, alike). Low-pass filtered
+ *       (payload_filter) and kept between 0 and maxPayload. A pose that can't tell (the tip right
+ *       under or over every joint) keeps the last estimate.
+*/
+void GaitEngine::updateAppendages(const JointFeedback& feedback) {
+    const Vec3 gravity = gravityInBody();
+    for (int i = 0; i < numAppendages(); ++i) {
+        const AppendageDefinition& appendage = robot.appendages[i];
+        if (!feedback.appendagePresent[i] || feedback.appendageAngles[i].size() != appendage.numJoints) {
+            continue;
+        }
+        appendage_angles[i] = feedback.appendageAngles[i];
+        if (payload_set[i] || !(appendage.maxPayload > 0) || !feedback.hasEffort ||
+            feedback.appendageEffort[i].size() != appendage.numJoints) {
+            continue;
+        }
+        // Gravity in the appendage's frame: the body's, turned back by its mount's yaw
+        const Vec3 g = AngleAxis(-appendage.mount.yaw, Vec3::UnitZ()) * gravity;
+        const JointVec perKg = appendagePayloadTorques(appendage, appendage_angles[i], g);
+        const Scalar spread = perKg.squaredNorm();
+        if (!(spread > S(1e-6))) {
+            continue;
+        }
+        const JointVec extra = feedback.appendageEffort[i] - appendageHoldTorques(appendage, appendage_angles[i], g);
+        const Scalar seen = std::clamp(perKg.dot(extra) / spread, S(0.0), appendage.maxPayload);
+        Scalar alpha = 1;
+        if (has_payload_stamp[i]) {
+            const Scalar dt = static_cast<Scalar>(std::max(0.0, toSeconds(feedback.stamp - payload_stamp[i])));
+            alpha = p.payload_filter > 0 ? dt / (p.payload_filter + dt) : S(1.0);
+        }
+        appendage_payload[i] += alpha * (seen - appendage_payload[i]);
+        payload_stamp[i] = feedback.stamp;
+        has_payload_stamp[i] = true;
+    }
+}
+
+void GaitEngine::setAppendagePayload(int appendage, Scalar kg) {
+    if (appendage < 0 || appendage >= numAppendages()) {
+        return;
+    }
+    payload_set[appendage] = kg >= 0;
+    if (kg >= 0) {
+        appendage_payload[appendage] = kg;
+    }
+    has_payload_stamp[appendage] = false;   // working it out again starts afresh
+}
+
+/**
+ * @brief Gravity's acceleration in the body frame (m/s^2): tilted by the IMU while it's fresh,
+ *        straight down otherwise
+*/
+Vec3 GaitEngine::gravityInBody() const {
+    const Vec3 up = imuFresh() ? Vec3(imuTilt().inverse() * Vec3::UnitZ()) : Vec3::UnitZ();
+    return -BalanceController::GRAVITY * up;
+}
+
+Vec3 GaitEngine::appendageToBody(int appendage, const Vec3& vector) const {
+    return AngleAxis(robot.appendages[appendage].mount.yaw, Vec3::UnitZ()) * vector;
 }
 
 /**

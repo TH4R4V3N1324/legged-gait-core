@@ -4,6 +4,7 @@
 #include <array>
 #include <cstdint>
 
+#include "gait_core/robot/appendage_definition.hpp"
 #include "gait_core/robot/gait_pattern.hpp"
 #include "gait_core/robot/leg_definition.hpp"
 #include "gait_core/types.hpp"
@@ -29,8 +30,14 @@ struct RobotDefinition {
     // (see GaitParams::min_stability_margin). The body origin is a fair guess for a symmetric robot.
     // With masses given (bodyMass > 0), this is the body's own, without its legs: the engine adds
     // each leg's links (JointDefinition::mass) where the joints put them, every tick.
+    // Likewise without its appendages: the engine adds those where their joints put them.
     Vec3 centreOfMass = Vec3::Zero();
     Scalar bodyMass = 0;   // kg, the body without its legs; 0: no masses, centreOfMass is the whole robot's and fixed
+
+    // Heads, arms and the like on the body (see AppendageDefinition): their weight, and what they
+    // hold, counts where their joints put it. Only with masses (bodyMass > 0).
+    int numAppendages = 0;                                   // 0..kMaxAppendages
+    std::array<AppendageDefinition, kMaxAppendages> appendages;   // indexed by appendage number
 
     // The gaits it can walk in, selected by index (the protocol's and ROS's gait id). Each must
     // time exactly numLegs legs; the engine won't move a robot with a gait it can't run.

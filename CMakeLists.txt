@@ -18,6 +18,7 @@ option(GAIT_CORE_BUNDLED_EIGEN "Always use third_party/eigen instead of looking 
 option(GAIT_CORE_BUILD_TESTS "Build the GoogleTest suite" ${GAIT_CORE_TOP_LEVEL})
 set(GAIT_CORE_MAX_JOINTS 6 CACHE STRING "Maximum joints per leg (sizes the fixed-size joint arrays)")
 set(GAIT_CORE_MAX_LEGS 6 CACHE STRING "Maximum legs per robot (sizes the fixed-size leg arrays)")
+set(GAIT_CORE_MAX_APPENDAGES 2 CACHE STRING "Maximum appendages (heads, arms) per robot (sizes their arrays)")
 
 # ---------------------------------------------------------------------------
 # Eigen: use the system copy when there is one (ROS, so every package in the process shares one
@@ -95,6 +96,12 @@ if(NOT GAIT_CORE_MAX_LEGS MATCHES "^[1-9][0-9]*$")
 endif()
 
 target_compile_definitions(gait_core PUBLIC GAIT_CORE_MAX_LEGS=${GAIT_CORE_MAX_LEGS})
+
+if(NOT GAIT_CORE_MAX_APPENDAGES MATCHES "^[0-9]+$")
+  message(FATAL_ERROR "GAIT_CORE_MAX_APPENDAGES must be zero or a positive integer, got '${GAIT_CORE_MAX_APPENDAGES}'")
+endif()
+
+target_compile_definitions(gait_core PUBLIC GAIT_CORE_MAX_APPENDAGES=${GAIT_CORE_MAX_APPENDAGES})
 
 if(GAIT_CORE_USE_DOUBLE)
   target_compile_definitions(gait_core PUBLIC GAIT_CORE_SCALAR=double)

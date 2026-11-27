@@ -16,6 +16,12 @@ static_assert(GAIT_CORE_MAX_LEGS > 0, "GAIT_CORE_MAX_LEGS must be a positive int
 
 static_assert(GAIT_CORE_MAX_JOINTS > 0, "GAIT_CORE_MAX_JOINTS must be a positive integer");
 
+#ifndef GAIT_CORE_MAX_APPENDAGES
+#define GAIT_CORE_MAX_APPENDAGES 2
+#endif
+
+static_assert(GAIT_CORE_MAX_APPENDAGES >= 0, "GAIT_CORE_MAX_APPENDAGES must be zero or a positive integer");
+
 /**
  * Scalar type used throughout the core. Defaults to float, which the ESP32 has hardware for and
  * which is much cheaper than double on the RP2040 (no FPU at all). The ROS build sets
@@ -45,6 +51,9 @@ inline constexpr int kMaxJointsPerLeg = GAIT_CORE_MAX_JOINTS;
 // The maximum number of legs, which sizes every per-leg array. The robot's actual leg count
 // (RobotDefinition::numLegs) is a runtime value, but it must be <= this value
 inline constexpr int kMaxLegs = GAIT_CORE_MAX_LEGS;
+
+// The most appendages (heads, arms: see AppendageDefinition) a robot can have, which sizes their arrays
+inline constexpr int kMaxAppendages = GAIT_CORE_MAX_APPENDAGES;
 
 // The most ground contact points a support polygon is built from: four corners for each foot with
 // a sole (LegDefinition::soleMin, soleMax), one for each point foot

@@ -23,6 +23,7 @@ set(GAIT_TESTS
   kinematics/test_kinematics
   kinematics/test_mass_properties
   kinematics/test_yaw_pitch_pitch_leg
+  locomotion/test_appendages
   locomotion/test_balance_controller
   locomotion/test_body_pose
   locomotion/test_foot_directions
