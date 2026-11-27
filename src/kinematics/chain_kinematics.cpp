@@ -157,6 +157,18 @@ Scalar ChainKinematics::descend(const Vec3& target, JointVec& q) const {
  *         which for a revolute joint is its axis crossed with the line from the joint to the foot
 */
 LegJacobian ChainKinematics::jacobian(const JointVec& q) const {
+    return fullJacobian(q).topRows<3>();
+}
+
+Mat3 ChainKinematics::footRotation(const JointVec& q) const {
+    Mat3 rotation = Mat3::Identity();
+    for (int j = 0; j < leg_.numJoints; ++j) {
+        rotation = rotation * AngleAxis(q(j), leg_.joints[j].axis).toRotationMatrix();
+    }
+    return rotation;
+}
+
+LegJacobian6 ChainKinematics::fullJacobian(const JointVec& q) const {
     Mat3 rotation = Mat3::Identity();
     Vec3 position = Vec3::Zero();
     std::array<Vec3, kMaxJointsPerLeg> jointPos;
@@ -170,9 +182,10 @@ LegJacobian ChainKinematics::jacobian(const JointVec& q) const {
     }
     const Vec3 foot = position + rotation * leg_.foot;
 
-    LegJacobian J(3, leg_.numJoints);
+    LegJacobian6 J(6, leg_.numJoints);
     for (int j = 0; j < leg_.numJoints; ++j) {
-        J.col(j) = jointAxis[j].cross(foot - jointPos[j]);
+        J.col(j).head<3>() = jointAxis[j].cross(foot - jointPos[j]);
+        J.col(j).tail<3>() = jointAxis[j];   // a revolute joint turns everything after it about its axis
     }
     return J;
 }

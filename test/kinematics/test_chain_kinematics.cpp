@@ -305,3 +305,35 @@ TEST(ChainKinematics, AThreeJointLegKeepsTheSolutionNearestItsSeed) {
     ASSERT_TRUE(chain.ik(chain.fk(q), q, solved));
     EXPECT_EQ(solved, q);
 }
+
+// ---- The foot's turning, for feet with soles ----------------------------------------------------
+
+TEST(ChainKinematics, FullJacobianTurnsTheFootAsFiniteDifferencesDo) {
+    // The biped's six-joint leg (yaw, roll, pitch, knee, ankle pitch, ankle roll): the angular rows
+    // are the foot's angular velocity, which finite differences of its rotation give as R' R^T
+    LegDefinition leg{};
+    leg.numJoints = 6;
+    leg.joints[0] = revolute(v(0, 0, 0), v(0, 0, 1), -1, 1);
+    leg.joints[1] = revolute(v(0, 0, 0), v(1, 0, 0), -1, 1);
+    leg.joints[2] = revolute(v(0, 0, 0), v(0, 1, 0), -2, 2);
+    leg.joints[3] = revolute(v(0, 0.04, -0.09), v(0, 1, 0), -0.1, 2.5);
+    leg.joints[4] = revolute(v(0.1, 0, 0), v(0, 1, 0), -1.5, 1.5);
+    leg.joints[5] = revolute(v(0, 0, 0), v(1, 0, 0), -1, 1);
+    leg.foot = v(0.04, 0, -0.05);
+    const ChainKinematics chain(leg);
+    const JointVec q = angles({0.2, -0.1, -0.6, 1.1, -0.4, 0.15});
+    const gait_core::LegJacobian6 J = chain.fullJacobian(q);
+    ASSERT_EQ(J.cols(), 6);
+    EXPECT_NEAR((J.topRows<3>() - finiteJacobian(chain, q)).norm(), 0.0, JACOBIAN_TOLERANCE);
+    EXPECT_NEAR((J.topRows<3>() - chain.jacobian(q)).norm(), 0.0, tol(1e-12));
+    const Scalar h = static_cast<Scalar>(IS_DOUBLE ? 1e-6 : 1e-3);
+    for (int j = 0; j < 6; ++j) {
+        JointVec plus = q, minus = q;
+        plus(j) += h;
+        minus(j) -= h;
+        const gait_core::Mat3 dR = (chain.footRotation(plus) - chain.footRotation(minus)) / (2 * h);
+        const gait_core::Mat3 W = dR * chain.footRotation(q).transpose();   // skew(omega)
+        const Vector3d omega(W(2, 1), W(0, 2), W(1, 0));
+        EXPECT_NEAR((J.col(j).tail<3>() - omega).norm(), 0.0, JACOBIAN_TOLERANCE * 10) << "joint " << j;
+    }
+}

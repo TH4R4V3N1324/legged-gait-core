@@ -46,8 +46,12 @@ Scalar GaitEngine::totalMass() const {
 */
 void GaitEngine::computeTorques() {
     output.hasTorques = false;
+    // The joint state the engine last saw answers the command before this one
+    const std::array<JointVec, kMaxLegs> lastCommand = posture_command;
+    posture_command = output.joints;
     for (int legNum = 0; legNum < numLegs(); ++legNum) {
         output.torques[legNum] = JointVec::Zero(output.joints[legNum].size());
+        output.stiffness[legNum] = JointVec::Ones(output.joints[legNum].size());
     }
     for (int i = 0; i < numAppendages(); ++i) {
         output.appendageTorques[i] = JointVec::Zero(robot.appendages[i].numJoints);
@@ -121,14 +125,82 @@ void GaitEngine::computeTorques() {
     // accelerates by. (Not the acceleration worked out from the commanded motion: on a dog's trot the
     // legs swinging move the centre of mass about enough to make that jitter by a lot.)
     const bool planned = walking && preview_started && previewPlans(config().currentGait);
-    const Vec2 accel = planned ? preview_controller.acceleration() : Vec2::Zero();
-    const Vec3 up = imuFresh() ? Vec3(imuTilt().inverse() * Vec3::UnitZ()) : Vec3::UnitZ();
-    const Vec3 total = mass * (BalanceController::GRAVITY * up + Vec3(accel.x(), accel.y(), 0));
-    Vec2 cop = planned ? preview_controller.zmp() + correction : Vec2(com.head<2>() + sway + correction);
+    Vec2 accel = planned ? preview_controller.acceleration() : Vec2::Zero();
+    const Vec2 plannedCop = planned ? preview_controller.zmp() + correction : Vec2(com.head<2>() + sway + correction);
+    // Capture point feedback (capture_torque_gain): push from past where it has gone, which brings it
+    // back. Measured only while balance feedback is on and walking (its error is zero otherwise).
+    const Scalar omega = balance_controller.state().omega;
+    const bool captureFeedback = walking && p.balance_feedback && p.capture_torque_gain > 0 && omega > 0;
+    Vec2 cop = plannedCop;
+    if (captureFeedback) {
+        cop += p.capture_torque_gain * balance_controller.state().captureError;
+    }
     Vec2 inside;
     if (stabilityMargin(support.data(), supportCount, cop) < 0 &&
         nearestStablePoint(support.data(), supportCount, cop, 0, inside)) {
         cop = inside;
+    }
+    // A centre of pressure moved by dp pushes the centre of mass the other way: c'' = omega^2 (c - p)
+    if (captureFeedback) {
+        accel -= omega * omega * (cop - plannedCop);
+    }
+    const Vec3 up = imuFresh() ? Vec3(imuTilt().inverse() * Vec3::UnitZ()) : Vec3::UnitZ();
+    Vec3 total = mass * (BalanceController::GRAVITY * up + Vec3(accel.x(), accel.y(), 0));
+
+    // Posture (stance_stiffness below 1): what the position control no longer holds, the torques do.
+    // Each planted leg's chain says how far the body has sunk and tilted over that foot (its measured
+    // joints against those commanded), averaged by load; a spring and damper on that adds lift, and
+    // a moment, made by moving the centre of pressure (tau / F_z), which leaves the push over the
+    // ground (the horizontal force) as it was
+    const Scalar give = 1 - std::clamp(p.stance_stiffness, S(0.0), S(1.0));
+    if (give > 0 && p.stance_posture_frequency > 0 && has_joint_states) {
+        Scalar sag = 0, weight = 0;
+        Vec3 tilt = Vec3::Zero();   // rad, body frame: the body turned from its command, over the feet
+        for (int i = 0; i < count; ++i) {
+            const int legNum = legs[i];
+            const ChainKinematics& chain = chains[legNum];
+            const JointVec& commanded = lastCommand[legNum];   // what the measured joints answer
+            if (chain.numJoints() != angles[i].size() || commanded.size() != angles[i].size()) {
+                continue;
+            }
+            const Scalar w = std::max(ramp[i], S(1e-3));
+            // A foot higher in the body than commanded means the body has sunk towards it
+            sag += w * (chain.fk(angles[i]).z() - chain.fk(commanded).z());
+            // The foot turned by R in the leg frame means the body turned the other way over it
+            const AngleAxis turned(chain.footRotation(angles[i]) * chain.footRotation(commanded).transpose());
+            const Vec3 legTilt = -turned.angle() * turned.axis();
+            tilt += w * Vec3(trajectoryGen.legToBody(legNum, legTilt) - trajectoryGen.legToBody(legNum, Vec3::Zero()));
+            weight += w;
+        }
+        if (weight > 0) {
+            sag /= weight;
+            tilt /= weight;
+            if (has_posture_sag && torque_dt > 0) {
+                const Scalar raw = (sag - posture_sag) / torque_dt;
+                constexpr Scalar RATE_FILTER = S(0.01);   // s
+                posture_sag_rate += (torque_dt / (RATE_FILTER + torque_dt)) * (raw - posture_sag_rate);
+            }
+            posture_sag = sag;
+            has_posture_sag = true;
+            const Scalar w0 = 2 * kPi * p.stance_posture_frequency;
+            const Scalar zeta = p.stance_posture_damping;
+            const Scalar height = std::max(com.z() - feet[0].z(), BalanceController::MIN_HEIGHT);
+            const Scalar inertia = mass * height * height;   // the body tipping about its feet
+            total.z() += give * mass * (w0 * w0 * sag + 2 * zeta * w0 * posture_sag_rate);
+            const Vec3 rate = imuFresh() ? body_angular_velocity : Vec3::Zero();
+            const Vec2 moment = -give * inertia * (w0 * w0 * tilt.head<2>() + 2 * zeta * w0 * rate.head<2>());
+            if (total.z() > 0) {
+                // A vertical force F_z at p turns the body about its centre of mass by (p - c) x F_z
+                cop += Vec2(-moment.y(), moment.x()) / total.z();
+                if (stabilityMargin(support.data(), supportCount, cop) < 0 &&
+                    nearestStablePoint(support.data(), supportCount, cop, 0, inside)) {
+                    cop = inside;
+                }
+            }
+        }
+    } else {
+        has_posture_sag = false;
+        posture_sag_rate = 0;
     }
 
     // Shares, weighted by how loaded each foot may be (r, its ramp): minimise sum w_i^2 / r_i with
@@ -136,6 +208,7 @@ void GaitEngine::computeTorques() {
     // and spread S weighted by r too. A foot ramping in or out takes less, and the centre of pressure
     // is still exactly where it should be. The pseudo-inverse covers feet in a line (or one foot).
     // Barely any weight anywhere (every foot landing or lifting at once): weigh them alike.
+    const std::array<Scalar, kMaxLegs> load = ramp;   // how far each foot is loaded in, for its stiffness
     Scalar weightSum = 0;
     for (int i = 0; i < count; ++i) {
         weightSum += ramp[i];
@@ -177,13 +250,53 @@ void GaitEngine::computeTorques() {
         return;
     }
 
+    // Led by the torques (stance_stiffness or capture_torque_gain), a foot with a sole also pushes from
+    // wherever in it the centre of pressure needs: the shares can only put it on the line between
+    // feet (on one foot, at that foot), so each sole makes up the rest as far as it reaches, with a
+    // moment about its foot through the leg's whole chain (its ankle)
+    const bool torqueLed = p.stance_stiffness < 1 || p.capture_torque_gain > 0;
+    Vec2 reached = Vec2::Zero();
+    for (int i = 0; i < count; ++i) {
+        reached += (share[i] / sum) * ground[i];
+    }
+    const Vec2 rest = cop - reached;
+    // Body frame directions into the leg frame (no coxa offset)
+    auto toLeg = [this](int legNum, const Vec3& v) {
+        return Vec3(trajectoryGen.bodyToLeg(legNum, v) - trajectoryGen.bodyToLeg(legNum, Vec3::Zero()));
+    };
+
     for (int i = 0; i < count; ++i) {
         const int legNum = legs[i];
         const Vec3 force = total * (share[i] / sum);   // the ground on this foot, body frame
-        // Into the leg frame (a direction: no coxa offset)
-        const Vec3 legForce = trajectoryGen.bodyToLeg(legNum, force) - trajectoryGen.bodyToLeg(legNum, Vec3::Zero());
-        const LegJacobian J = kinematics(legNum).jacobian(angles[i]);
-        output.torques[legNum] = -J.transpose() * legForce;
+        const Vec3 legForce = toLeg(legNum, force);
+        const ChainKinematics& chain = chains[legNum];
+        const bool canTurnSole = torqueLed && robot.legs[legNum].hasSole() && chain.numJoints() == angles[i].size();
+        Vec2 offset = Vec2::Zero();   // where in its sole this foot pushes from, from the foot point
+        if (canTurnSole && rest.squaredNorm() > 0) {
+            ContactPoints sole;
+            const int corners = addContactPoints(legNum, ground[i], angles[i], sole, 0);
+            Vec2 target = ground[i] + rest;
+            Vec2 inSole;
+            if (stabilityMargin(sole.data(), corners, target) < 0 &&
+                nearestStablePoint(sole.data(), corners, target, 0, inSole)) {
+                target = inSole;
+            }
+            offset = target - ground[i];
+        }
+        if (offset.squaredNorm() > 0) {
+            Eigen::Matrix<Scalar, 6, 1> wrench;
+            wrench.head<3>() = legForce;
+            wrench.tail<3>() = toLeg(legNum, Vec3(offset.x(), offset.y(), 0).cross(force));
+            output.torques[legNum] = -chain.fullJacobian(angles[i]).transpose() * wrench;
+        } else {
+            const LegJacobian J = kinematics(legNum).jacobian(angles[i]);
+            output.torques[legNum] = -J.transpose() * legForce;
+        }
+        // Planted, the torques carry it: the position control eases off as the foot loads up
+        if (p.stance_stiffness < 1) {
+            const Scalar stiffness = 1 - load[i] * (1 - std::clamp(p.stance_stiffness, S(0.0), S(1.0)));
+            output.stiffness[legNum].setConstant(stiffness);
+        }
     }
     output.hasTorques = true;
 }

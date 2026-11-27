@@ -127,6 +127,8 @@ struct GaitParams {
                                                 // gait's usual wobble, over ~2 s), so only a push acts
     Scalar correction_max = Scalar(0.03);       // m, furthest the body shifts over its feet to correct
     bool capture_stepping = true;               // step where the capture point is heading when the shift can't catch it
+    Scalar catch_threshold = Scalar(0.01);      // m
+    Scalar catch_settle_time = Scalar(1.0);     // s
 
     // Preview control (live): for a gait that sways, plan the sway over the coming phases instead of
     // reacting at each. The ZMP reference runs through points inside both the feet down in one phase
@@ -149,6 +151,23 @@ struct GaitParams {
     // planted leg's share of carrying the robot and accelerating it as planned, tau = -J^T f, in
     // GaitOutput::torques. Needs the robot's masses (RobotDefinition::bodyMass and the links').
     bool torque_output = false;
+    // With torque_output, the planted legs can be left to the torques rather than the position
+    // control: GaitOutput::stiffness tells the robot what share of its own kp and kd to use on each
+    // joint, stance_stiffness on a planted leg (ramped in and out with its load, so a foot about to
+    // lift is back on position control) and 1 on a swinging one. 1 changes nothing.
+    Scalar stance_stiffness = Scalar(1.0);
+    // What the position control gives up on a planted leg, the torques take on: a spring and damper
+    // on the body's height and tilt over its planted feet (from each leg's measured and commanded
+    // joints, and the IMU's rates), at stance_posture_frequency with damping ratio
+    // stance_posture_damping, scaled by 1 - stance_stiffness
+    Scalar stance_posture_frequency = Scalar(4.0);   // Hz
+    Scalar stance_posture_damping = Scalar(0.7);
+    // With torque_output and balance_feedback: the feet push from where the capture point has gone,
+    // the centre of pressure moving by capture_torque_gain x the capture point's error (measured less
+    // planned) and the push over the ground with it, m omega^2 (c - p), inside the feet. The capture
+    // point runs away from where the feet push, so a gain above 1 brings it back. A foot with a sole
+    // moves its own centre of pressure within the sole, with a moment about the foot (its ankle). 0 off.
+    Scalar capture_torque_gain = Scalar(0);
 
     // Foot placement (live): for a gait that balances by stepping (one whose feet down are ever just a
     // line, like a trot, pace or bound), land each swinging foot where the body is really heading as
@@ -256,12 +275,17 @@ struct GaitOutput {
     // the engine gave LegKinematics::ikWithSole, for a robot that solves its own legs. The identity
     // for legs without a sole.
     std::array<Mat3, kMaxLegs> soles;
+    // What share of its own position gains (kp and kd) the robot should use on each joint, 0..1, same
+    // order as joints: GaitParams::stance_stiffness on a planted leg, so the torques carry it, and 1
+    // elsewhere. All ones unless torque_output and stance_stiffness say otherwise.
+    std::array<JointVec, kMaxLegs> stiffness;
 
-    // Zeros, never empty; the engine resizes each leg to its kinematics' numJoints()
+    // Zeros (stiffness ones), never empty; the engine resizes each leg to its kinematics' numJoints()
     GaitOutput() {
         joints.fill(JointVec::Zero(YawPitchPitchLeg::kNumJoints));
         torques.fill(JointVec::Zero(YawPitchPitchLeg::kNumJoints));
         soles.fill(Mat3::Identity());
+        stiffness.fill(JointVec::Ones(YawPitchPitchLeg::kNumJoints));
     }
 };
 
@@ -726,6 +750,10 @@ private:
     void computeTorques();
     std::array<Scalar, kMaxLegs> torque_down_time{};   // s each foot has been down, for ramping its share in
     Scalar torque_dt = 0;                              // the tick the torques are for
+    Scalar posture_sag = 0;                            // m, how far the body has sunk below its command over the feet
+    Scalar posture_sag_rate = 0;                       // m/s, filtered
+    bool has_posture_sag = false;
+    std::array<JointVec, kMaxLegs> posture_command;    // the joints last commanded: what the latest joint state answers
     bool walk_advancing = false;                       // the last walking tick moved the gait on
     Scalar totalMass() const;
 

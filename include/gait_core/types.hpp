@@ -61,6 +61,9 @@ inline constexpr int kMaxContactPoints = 4 * kMaxLegs;
 
 using JointVec = Eigen::Matrix<Scalar, Eigen::Dynamic, 1, Eigen::ColMajor, kMaxJointsPerLeg, 1>;
 using LegJacobian = Eigen::Matrix<Scalar, 3, Eigen::Dynamic, Eigen::ColMajor, 3, kMaxJointsPerLeg>;
+// The foot's linear (rows 0-2) and angular (rows 3-5) velocity for each joint: what a foot with a
+// sole needs, as the ground can push on it with a moment as well as a force
+using LegJacobian6 = Eigen::Matrix<Scalar, 6, Eigen::Dynamic, Eigen::ColMajor, 6, kMaxJointsPerLeg>;
 
 /**
  * @brief A point in time, in nanoseconds from any fixed origin (ROS time, or micros() * 1000)

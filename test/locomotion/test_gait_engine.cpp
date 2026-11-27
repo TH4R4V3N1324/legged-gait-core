@@ -1731,3 +1731,49 @@ TEST(GaitEngine, AStaleOutsideVelocityIsIgnored) {
     robot.run(2.0);
     EXPECT_LT(robot.engine.placementOffset().norm(), 0.003);
 }
+
+// ---------------------------------------------------------------------------------------------
+// Torque-led stance (stance_stiffness, capture_torque_gain)
+// ---------------------------------------------------------------------------------------------
+
+TEST(GaitEngine, StiffnessIsAllOnesUnlessTheStanceIsLeftToTheTorques) {
+    Robot robot = standingRobot(torques());
+    robot.engine.setVelocity({static_cast<Scalar>(0.1), 0, 0});
+    for (int i = 0; i < 100; ++i) {
+        const GaitOutput out = tick(robot);
+        for (int leg = 0; leg < NUM_LEGS; ++leg) {
+            ASSERT_EQ(out.stiffness[leg], JointVec::Ones(3)) << "tick " << i << " leg " << leg;
+        }
+    }
+}
+
+TEST(GaitEngine, ASoftStanceLeavesPlantedLegsToTheTorques) {
+    GaitParams params = torques();
+    params.stance_stiffness = static_cast<Scalar>(0.3);
+    Robot robot = standingRobot(params);
+    // Standing, every foot is planted and fully loaded: 0.3 everywhere, and the weight still carried
+    {
+        const GaitOutput out = tick(robot);
+        for (int leg = 0; leg < NUM_LEGS; ++leg) {
+            EXPECT_NEAR(out.stiffness[leg](0), 0.3, 1e-6) << "leg " << leg;
+        }
+        EXPECT_NEAR(forcesFrom(robot, out, seen).total.z(), EXPLORER_MASS * 9.81, 0.5);
+    }
+    // Walking, a swinging leg is back on position control
+    robot.engine.setVelocity({static_cast<Scalar>(0.1), 0, 0});
+    robot.run(1.0);
+    int swingTicks = 0;
+    const gait_core::YawPitchPitchLeg leg{explorerRobot().legs[0]};
+    for (int i = 0; i < 200; ++i) {
+        const GaitOutput out = tick(robot);
+        for (int l = 0; l < NUM_LEGS; ++l) {
+            ASSERT_GE(out.stiffness[l](0), 0.3 - 1e-6);
+            ASSERT_LE(out.stiffness[l](0), 1 + 1e-6);
+            if (leg.fk(out.joints[l]).z() > robot.engine.gaitConfig().currentHeight + static_cast<Scalar>(0.005)) {
+                ASSERT_NEAR(out.stiffness[l](0), 1, 1e-6) << "tick " << i << " leg " << l << " is in the air";
+                ++swingTicks;
+            }
+        }
+    }
+    EXPECT_GT(swingTicks, 50);
+}

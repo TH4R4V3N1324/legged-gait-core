@@ -30,6 +30,18 @@ public:
     Vec3 fk(const JointVec& q) const override;
     bool ik(const Vec3& target, const JointVec& seed, JointVec& q) const override;
     LegJacobian jacobian(const JointVec& q) const override;
+    /**
+     * @brief How the foot moves and turns with each joint
+     * @return 6 x numJoints: rows 0-2 the foot point's velocity (as jacobian()), rows 3-5 the foot's
+     *         angular velocity, for joint j turning at 1 rad/s (leg frame). tau = -J^T [f; m] holds
+     *         the ground pushing on the foot with force f at the foot point and moment m about it.
+    */
+    LegJacobian6 fullJacobian(const JointVec& q) const;
+    /**
+     * @brief How the foot is turned: the last joint's frame (leg frame axes as columns), the frame
+     *        LegDefinition::foot is given in
+    */
+    Mat3 footRotation(const JointVec& q) const;
 
     // m, how close ik must put the foot. Near a straight leg the foot barely moves with the knee
     // (~6 mm/rad on explorer), so this is ~2e-4 rad there; float resolves the foot to ~3e-8 m.
