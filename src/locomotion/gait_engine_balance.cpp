@@ -19,7 +19,9 @@ bool GaitEngine::tiltFeasible(const BodyPose& pose, std::array<Vec3, kMaxLegs>& 
         if (std::hypot(offset.x(), offset.y()) > config().maxStride) {
             return false;
         }
-        if (!reachable(legNum, targets[legNum])) {
+        // The sole as it will be in this pose (see feetPoseRotation)
+        const Mat3 sole = soleOrientation(legNum, TrajectoryGenerator::rotationOf(pose));
+        if (!reachable(legNum, targets[legNum], &sole)) {
             return false;
         }
     }

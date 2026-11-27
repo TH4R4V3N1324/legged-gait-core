@@ -201,6 +201,7 @@ void GaitEngine::cutServoPower() {
         fresh.setLegKinematics(legNum, legKinematics[legNum]);
     }
     fresh.legOdometry = legOdometry;
+    fresh.turn_scale = turn_scale;   // learned from this robot's turning
     // The head or arm stays where it is, holding what it holds
     fresh.appendage_angles = appendage_angles;
     fresh.appendage_payload = appendage_payload;

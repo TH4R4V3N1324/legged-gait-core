@@ -129,6 +129,10 @@ Vec3 TrajectoryGenerator::unposedBodyPoint(const Vec3& bodyPoint, const BodyPose
     return poseRotation(pose) * bodyPoint + pose.translation;
 }
 
+Mat3 TrajectoryGenerator::rotationOf(const BodyPose& pose) {
+    return poseRotation(pose);
+}
+
 /**
  * @brief Body pose that rolls and pitches the body about a fixed point rather than its origin
  * @param[in] roll Roll (rad)

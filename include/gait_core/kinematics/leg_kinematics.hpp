@@ -37,6 +37,23 @@ public:
     virtual bool ik(const Vec3& target, const JointVec& seed, JointVec& jointAngles) const = 0;
 
     /**
+     * @brief Inverse kinematics with the sole turned a given way, for a foot that can be turned (a hip
+     *        yaw, an ankle): the engine calls this for every leg with a sole (LegDefinition::hasSole)
+     * @param[in] target The desired position of the foot in the leg's frame
+     * @param[in] sole How the sole should be turned, in the leg's frame: its x (forward), y and z (up)
+     *            axes as columns. It keeps the sole flat on the ground and facing the way it was put
+     *            down, however the body is posed in tilt mode and however far it has turned since.
+     * @param[in] seed, jointAngles As ik
+     * @return As ik
+     * @note By default the sole is left to whatever ik gives: override this in kinematics that can
+     *       turn the foot. ChainKinematics and YawPitchPitchLeg don't (their feet are points).
+    */
+    virtual bool ikWithSole(const Vec3& target, const Mat3& sole, const JointVec& seed, JointVec& jointAngles) const {
+        (void)sole;
+        return ik(target, seed, jointAngles);
+    }
+
+    /**
      * @brief Compute the Jacobian matrix for the leg at a given joint configuration
      * @param[in] jointAngles The angles of each joint, in order from the body to the foot
      * @return The Jacobian matrix, which maps joint velocities to foot velocities

@@ -26,7 +26,10 @@ void GaitEngine::performLegStep(Scalar dt, bool idle, bool handlePhaseTransition
         SwingSpline& spline = trajectoryGen.gaitState.swingSplines[legNum];
         LineSpline& stanceSpline = trajectoryGen.gaitState.stanceSplines[legNum];
         if (spline.active) {
+            // A sole stepping back to stance straightens as it goes, arriving straight
+            const Scalar before = spline.s;
             spline.s = std::min(S(1.0), spline.s + ds);
+            sole_heading[legNum] *= before < 1 ? (1 - spline.s) / (1 - before) : S(0.0);
             spline.active = spline.s < 1;
         } else if (stanceSpline.active) {
             stanceSpline.s = std::min(S(1.0), stanceSpline.s + ds);
@@ -263,7 +266,7 @@ void GaitEngine::walk(Scalar dt) {
     // Current command, capped at what this gait can do
     Scalar forward = current_motion_intent.forward;
     Scalar left = current_motion_intent.left;
-    Scalar yaw = current_motion_intent.yaw;
+    Scalar yaw = feedbackTurn(current_motion_intent.yaw, dt);
     Scalar footSpeed = std::hypot(forward, left) + std::abs(yaw) * trajectoryGen.maxBodyRadius();
     const Scalar maxSpeed = maxFootSpeed();
     if (footSpeed > maxSpeed) {
@@ -294,6 +297,7 @@ void GaitEngine::walk(Scalar dt) {
         for (int legNum = 0; legNum < numLegs(); ++legNum) {
             leg_swinging[legNum] = trajectoryGen.gaitState.config.swingsIn(legNum, phase);
             swing_start[legNum] = current_leg_positions[legNum];
+            swing_start_heading[legNum] = sole_heading[legNum];
             swing_target[legNum] = current_leg_positions[legNum];
             trajectoryGen.gaitState.swingSplines[legNum].active = false;
             trajectoryGen.gaitState.stanceSplines[legNum].active = false;
@@ -364,6 +368,7 @@ void GaitEngine::walk(Scalar dt) {
         moveDt *= scale;
         targets = walkTargets(forward, left, yaw, ds, moveDt);
     }
+    turnSoles(yaw, ds, moveDt, stanceTime);
     sendFootTargets(targets, dt);
     walk_advancing = ds > 0;
     updateBalance(dt, dt > 0 ? moveDt / dt : S(0.0));
@@ -391,6 +396,30 @@ void GaitEngine::walk(Scalar dt) {
             step_offset = Vec2::Zero();   // that step has landed and none more is needed
         }
     }
+}
+
+/**
+ * @brief The turn rate to plan for one asked for, with turn feedback (GaitParams::turn_feedback)
+ * @param[in] wanted rad/s, the turn asked for
+ * @param[in] dt The time since the last tick (s)
+ * @return wanted x turn_scale. The scale learns from the IMU's yaw rate while the robot walks a turn
+ *         of at least 0.05 rad/s with a fresh IMU: by turn_feedback_gain x (wanted - measured) /
+ *         wanted per second, so it settles where the robot turns as fast as asked.
+ * @note The yaw rate is the body's about its own z axis, near enough the world's for the tilts a
+ *       walking robot has. It swings back and forth with each step; the scale only moves slowly.
+*/
+Scalar GaitEngine::feedbackTurn(Scalar wanted, Scalar dt) {
+    if (!p.turn_feedback) {
+        turn_scale = 1;
+        return wanted;
+    }
+    constexpr Scalar MIN_TURN = S(0.05);   // rad/s: below this the ratio is mostly noise
+    if (imuFresh() && dt > 0 && std::abs(wanted) >= MIN_TURN) {
+        const Scalar error = (wanted - body_angular_velocity.z()) / wanted;
+        turn_scale = std::clamp(turn_scale + p.turn_feedback_gain * error * dt,
+                                1 - p.turn_feedback_range, 1 + p.turn_feedback_range);
+    }
+    return wanted * turn_scale;
 }
 
 /**

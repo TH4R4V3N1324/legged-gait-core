@@ -357,3 +357,85 @@ TEST(NoHeap, AnArmSwingingAndCarryingNeverAllocates) {
     EXPECT_EQ(allocations.load() - before, 0) << "allocations while the arm moved and carried";
     EXPECT_GT(engine.appendagePayload(0), 0.4) << "it worked the load out";
 }
+
+TEST(NoHeap, TurningSolesNeverAllocate) {
+    // The biped's soles: turning on the spot and on an arc, then tilt mode
+    const gait_core::RobotDefinition robot = test_robots::biped();
+    GaitEngine engine{test_robots::bipedParams(false), robot};
+    engine.log = [](LogLevel, const char*) { ++logged; };
+    JointFeedback feedback;
+    for (int leg = 0; leg < robot.numLegs; ++leg) {
+        feedback.present[leg] = true;
+        feedback.angles[leg] = JointVec::Zero(robot.legs[leg].numJoints);
+    }
+    Timestamp now = 1'000'000'000;
+    auto run = [&](double seconds) {
+        const int ticks = static_cast<int>(seconds / 0.01 + 0.5);
+        for (int i = 0; i < ticks; ++i) {
+            feedback.stamp = now;
+            engine.onJointStates(feedback);
+            now += 10'000'000;
+            const GaitOutput out = engine.update(static_cast<Scalar>(0.01), now);
+            if (out.commanded) {
+                for (int leg = 0; leg < robot.numLegs; ++leg) {
+                    feedback.angles[leg] = out.joints[leg];
+                }
+            }
+        }
+    };
+    run(3.0);
+    engine.sit(false);
+    run(8.0);
+    const long before = allocations.load();
+    engine.setVelocity({0, 0, static_cast<Scalar>(0.3)});
+    run(4.0);
+    engine.setVelocity({static_cast<Scalar>(0.05), 0, static_cast<Scalar>(0.2)});
+    run(4.0);
+    engine.setVelocity({0, 0, 0});
+    run(4.0);
+    engine.setMode(gait_core::MODE_TILT);
+    engine.setBodyPose(static_cast<Scalar>(0.06), static_cast<Scalar>(-0.05), static_cast<Scalar>(0.1), Vec3::Zero());
+    run(2.0);
+    EXPECT_EQ(allocations.load() - before, 0) << "allocations while the soles turned";
+}
+
+TEST(NoHeap, TurnFeedbackNeverAllocates) {
+    gait_core::GaitParams params;
+    params.turn_feedback = true;
+    const gait_core::RobotDefinition robot = explorerRobot();
+    GaitEngine engine{params, robot};
+    engine.log = [](LogLevel, const char*) { ++logged; };
+    JointFeedback feedback;
+    for (int leg = 0; leg < robot.numLegs; ++leg) {
+        feedback.present[leg] = true;
+        feedback.angles[leg] = JointVec::Zero(3);
+    }
+    Timestamp now = 1'000'000'000;
+    auto run = [&](double seconds) {
+        const int ticks = static_cast<int>(seconds / 0.01 + 0.5);
+        for (int i = 0; i < ticks; ++i) {
+            feedback.stamp = now;
+            engine.onJointStates(feedback);
+            ImuSample sample;
+            sample.stamp = now;
+            sample.linearAcceleration = Vec3(0, 0, static_cast<Scalar>(9.81));
+            sample.angularVelocity = Vec3(0, 0, static_cast<Scalar>(0.35));
+            engine.setImu(sample);
+            now += 10'000'000;
+            const GaitOutput out = engine.update(static_cast<Scalar>(0.01), now);
+            if (out.commanded) {
+                for (int leg = 0; leg < robot.numLegs; ++leg) {
+                    feedback.angles[leg] = out.joints[leg];
+                }
+            }
+        }
+    };
+    run(3.0);
+    engine.sit(false);
+    run(6.0);
+    const long before = allocations.load();
+    engine.setVelocity({0, 0, static_cast<Scalar>(0.3)});
+    run(5.0);
+    EXPECT_EQ(allocations.load() - before, 0) << "allocations while learning the turn";
+    EXPECT_LT(engine.turnScale(), 1) << "it learned from the gyro";
+}

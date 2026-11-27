@@ -156,7 +156,8 @@ void GaitEngine::commandFoot(const Vec3& target, int legNum, Scalar dt) {
     const JointVec seed = output.joints[legNum];
     JointVec& q = output.joints[legNum];
     const Vec3 posed = trajectoryGen.posedFoot(legNum, target, pose) + lift;
-    leg.ik(posed, seed, q);
+    output.soles[legNum] = soleOrientation(legNum, feetPoseRotation());
+    solveLeg(legNum, posed, output.soles[legNum], seed, q);
 
     bool limited = false;        // held at a joint limit
     bool speedLimited = false;   // held to a joint speed limit
@@ -364,8 +365,9 @@ Scalar GaitEngine::jointSpeedScale(const std::array<Vec3, kMaxLegs>& targets, Sc
         const LegKinematics& leg = kinematics(legNum);
         JointVec from;
         JointVec to;
-        leg.ik(current_leg_positions[legNum], output.joints[legNum], from);
-        leg.ik(targets[legNum], from, to);
+        const Mat3 sole = soleOrientation(legNum, feetPoseRotation());
+        solveLeg(legNum, current_leg_positions[legNum], sole, output.joints[legNum], from);
+        solveLeg(legNum, targets[legNum], sole, from, to);
         const LegDefinition& def = robot.legs[legNum];
         const int joints = std::min<int>(static_cast<int>(to.size()), def.numJoints);
         for (int j = 0; j < joints; ++j) {

@@ -67,6 +67,8 @@ public:
     Vec3 posedFoot(int legNum, const Vec3& groundFoot, const BodyPose& pose) const;
     Vec3 unposedBodyPoint(const Vec3& bodyPoint, const BodyPose& pose) const;
     static BodyPose rotationAbout(Scalar roll, Scalar pitch, const Vec3& pivot);
+    // A pose's rotation (yaw, then pitch, then roll: Z Y X): a posed body direction d is R d unposed
+    static Mat3 rotationOf(const BodyPose& pose);
     Vec3 neutralFootInBody(int legNum) const;
     Vec3 footDisplacement(Scalar forward, Scalar left, Scalar yaw, int legNum, Scalar duration) const;
     Vec3 footDisplacement(const VelocityCommand& cmd, int legNum, Scalar duration) const;

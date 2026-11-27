@@ -97,7 +97,7 @@ GaitEngine::GaitEngine(const GaitParams& params, const RobotDefinition& geometry
     // The gaits' margins are judged with the legs in their standing stance
     for (int legNum = 0; legNum < numLegs(); ++legNum) {
         JointVec stance;
-        kinematics(legNum).ik(config().startPosition[legNum], output.joints[legNum], stance);
+        solveLeg(legNum, config().startPosition[legNum], soleOrientation(legNum, Mat3::Identity()), output.joints[legNum], stance);
         output.joints[legNum] = stance;
     }
     com = liveCentreOfMass();
@@ -203,7 +203,7 @@ void GaitEngine::emitThrottled(int key, Scalar period, LogLevel level, const cha
  *       works. A leg given kinematics (setLegKinematics) with a different joint count than its
  *       definition is never reachable, as there are no limits to check it against.
 */
-bool GaitEngine::reachable(int legNum, const Vec3& target) const {
+bool GaitEngine::reachable(int legNum, const Vec3& target, const Mat3* sole) const {
     constexpr Scalar REACH_TOLERANCE = S(1e-3);  // m
     const LegKinematics& leg = kinematics(legNum);              // the solver
     const LegDefinition& definition = robot.legs[legNum];  // its joints and their limits
@@ -211,13 +211,76 @@ bool GaitEngine::reachable(int legNum, const Vec3& target) const {
         return false;  // an override with a different chain: no limits to judge it by
     }
     JointVec angles;
-    leg.ik(target, output.joints[legNum], angles);  // the result is judged below, not by ik's flag
+    // The sole as it is now unless told otherwise; the result is judged below, not by ik's flag
+    solveLeg(legNum, target, sole != nullptr ? *sole : soleOrientation(legNum, feetPoseRotation()), output.joints[legNum], angles);
     for (int j = 0; j < leg.numJoints(); ++j) {
         if (angles(j) < definition.joints[j].lower || angles(j) > definition.joints[j].upper) {
             return false;
         }
     }
     return (leg.fk(angles) - target).norm() <= REACH_TOLERANCE;
+}
+
+/**
+ * @brief How a leg's sole is to be turned, in the leg's frame, for LegKinematics::ikWithSole
+ * @param[in] legNum The leg
+ * @param[in] feetPose The rotation the feet are posed through (feetPoseRotation)
+ * @return Its heading on the ground (sole_heading) turned back through the pose, so the sole stays
+ *         flat and square to the ground however the body is posed: the identity for a leg without a sole
+*/
+Mat3 GaitEngine::soleOrientation(int legNum, const Mat3& feetPose) const {
+    const LegDefinition& leg = robot.legs[legNum];
+    if (!leg.hasSole()) {
+        return Mat3::Identity();
+    }
+    // Unposed body frame: the leg's yaw and the sole's heading. Posed: back through the pose. Leg frame:
+    // undo the leg's yaw.
+    const Mat3 legYaw = AngleAxis(leg.mount.yaw, Vec3::UnitZ()).toRotationMatrix();
+    return legYaw.transpose() * feetPose.transpose() * legYaw * AngleAxis(sole_heading[legNum], Vec3::UnitZ()).toRotationMatrix();
+}
+
+/**
+ * @brief The rotation the soles are turned back through: tilt mode's pose while it's on, else none
+ * @note Walk leveling's isn't included. It's worked out from the IMU, so turning planted soles by it
+ *       closes a loop through the ground (the ankles tip the body, which the IMU sees, which turns the
+ *       ankles): in MuJoCo it made a biped (Draxi) fall at walking speeds it otherwise managed. Its
+ *       angles are small on level ground; on a slope the soles stay square to the leveled body.
+*/
+Mat3 GaitEngine::feetPoseRotation() const {
+    return tilt_active ? TrajectoryGenerator::rotationOf(tilt_applied) : Mat3(Mat3::Identity());
+}
+
+/**
+ * @brief Solve a leg: with its sole turned if it has one (LegKinematics::ikWithSole), else plain ik
+*/
+bool GaitEngine::solveLeg(int legNum, const Vec3& target, const Mat3& sole, const JointVec& seed, JointVec& q) const {
+    const LegKinematics& leg = kinematics(legNum);
+    return robot.legs[legNum].hasSole() ? leg.ikWithSole(target, sole, seed, q) : leg.ik(target, seed, q);
+}
+
+/**
+ * @brief Turn the soles with the walk, one tick (legs with soles)
+ * @param[in] yaw rad/s, the body's turn rate this tick
+ * @param[in] ds How far the phase moves on this tick
+ * @param[in] moveDt s of body motion the planted feet get this tick
+ * @param[in] stanceTime s each foot stays down, which sets where a swing lands
+ * @note A planted sole turns back by yaw x moveDt, exactly as its foot's position turns about the
+ *       body (footDisplacementFrom). A swinging one goes from its lift-off heading to the one it lands
+ *       on, yaw x stanceTime / 2 (as swingTarget aims its landing point), as far along as the phase.
+*/
+void GaitEngine::turnSoles(Scalar yaw, Scalar ds, Scalar moveDt, Scalar stanceTime) {
+    const Scalar s = std::min(S(1.0), phase_progress + ds);
+    const Scalar landing = yaw * stanceTime / 2;
+    for (int legNum = 0; legNum < numLegs(); ++legNum) {
+        if (!robot.legs[legNum].hasSole()) {
+            continue;
+        }
+        if (leg_swinging[legNum]) {
+            sole_heading[legNum] = swing_start_heading[legNum] + s * (landing - swing_start_heading[legNum]);
+        } else {
+            sole_heading[legNum] = std::remainder(sole_heading[legNum] - yaw * moveDt, 2 * kPi);
+        }
+    }
 }
 
 /**

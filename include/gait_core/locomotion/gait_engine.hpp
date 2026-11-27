@@ -157,6 +157,17 @@ struct GaitParams {
     // Measures the body's velocity as balance_feedback does (leg odometry and the IMU).
     bool foot_placement = false;
     Scalar foot_placement_gain = Scalar(1.0);   // share of that capture point offset the feet step by
+
+    // Turn feedback (live): make the robot turn as fast as it's told, from the IMU's yaw rate. A robot
+    // whose feet slip as it turns (in MuJoCo a biped's soles slip round as the weight passes from one
+    // foot to the other, turning it ~20% further than planned) turns faster or slower than its feet
+    // plan, by much the same share at any rate. Walking, with a fresh IMU and a turn of at least 0.05
+    // rad/s asked for, the turn the gait plans is scaled by turnScale(), which moves by
+    // turn_feedback_gain x (asked - measured) / asked each second until the measured rate matches;
+    // it keeps its value in between, since it's the robot's own. Kept within 1 +- turn_feedback_range.
+    bool turn_feedback = false;
+    Scalar turn_feedback_gain = Scalar(1.0);    // 1/s, how fast the scale learns (~1 s to settle)
+    Scalar turn_feedback_range = Scalar(0.5);   // the scale stays within 1 +- this
 };
 
 enum class SitState : uint8_t {
@@ -240,11 +251,17 @@ struct GaitOutput {
     // hold it and its payload up against gravity (N m, body to tip), to add to its own position
     // control. Sized to the appendage's numJoints; empty for appendages the robot doesn't have.
     std::array<JointVec, kMaxAppendages> appendageTorques;
+    // How each leg's sole is turned, in the leg's frame (its x, y, z axes as columns): flat on the
+    // ground and facing the way it was put down, under tilt mode's pose and as the robot turns. What
+    // the engine gave LegKinematics::ikWithSole, for a robot that solves its own legs. The identity
+    // for legs without a sole.
+    std::array<Mat3, kMaxLegs> soles;
 
     // Zeros, never empty; the engine resizes each leg to its kinematics' numJoints()
     GaitOutput() {
         joints.fill(JointVec::Zero(YawPitchPitchLeg::kNumJoints));
         torques.fill(JointVec::Zero(YawPitchPitchLeg::kNumJoints));
+        soles.fill(Mat3::Identity());
     }
 };
 
@@ -415,6 +432,8 @@ public:
     bool gaitHasSupportArea(uint8_t gait) const { return gait < config().numGaits() && gait_area[gait]; }
     // m, the body's current sway (x, y), relative to where walking alone would put it
     const Vec2& bodySway() const { return sway; }
+    // How much the planned turn is scaled so the robot turns as fast as it's asked (turn_feedback): 1 off
+    Scalar turnScale() const { return turn_scale; }
     // Preview control's planner (see preview_control), and the ZMP it was last asked to track next
     const PreviewController& preview() const { return preview_controller; }
     const Vec2& previewReference() const { return preview_reference[0]; }
@@ -666,6 +685,10 @@ private:
     Scalar sway_hold_time = 0;   // s the current phase has waited for the sway
     bool sway_holding = false;   // waiting at a phase's start for the body to sway over the feet
     BodyPose walkPose() const;
+
+    // Turn feedback (see GaitParams::turn_feedback)
+    Scalar turn_scale = 1;
+    Scalar feedbackTurn(Scalar wanted, Scalar dt);
     void easeSway(const Vec2& goal, Scalar dt);
     bool updateSway(Scalar dt, bool idle);
     bool holdForSway(Scalar dt, bool idle, const ContactPoints& feet, int count, const Vec2& goal);
@@ -721,7 +744,18 @@ private:
     bool forcesValid();
     void adaptToTerrain(Scalar dt);
     void updateLoadBalance(Scalar dt);
-    bool reachable(int legNum, const Vec3& target) const;
+    bool reachable(int legNum, const Vec3& target, const Mat3* sole = nullptr) const;
+
+    // Soles (legs with LegDefinition::hasSole): each one's heading on the ground, relative to the
+    // leg frame's x with the body unposed (rad). A planted sole turns back as the body turns over it;
+    // a swinging one turns to the heading it lands on. The IK is given it turned back through the
+    // body's commanded pose (soleOrientation), so the sole stays flat and square to the ground.
+    std::array<Scalar, kMaxLegs> sole_heading{};
+    std::array<Scalar, kMaxLegs> swing_start_heading{};
+    Mat3 soleOrientation(int legNum, const Mat3& feetPose) const;
+    Mat3 feetPoseRotation() const;
+    bool solveLeg(int legNum, const Vec3& target, const Mat3& sole, const JointVec& seed, JointVec& q) const;
+    void turnSoles(Scalar yaw, Scalar ds, Scalar moveDt, Scalar stanceTime);
     bool everyLegReaches(const Vec3& target) const;
     Vec3 limitSwingLift(int legNum, const Vec3& target, Scalar groundZ);
     void updateWalkLeveling(Scalar dt);
